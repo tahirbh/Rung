@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RUNG - Court Piece Card Game</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css">
+
+</head>
+<body>
+    <div class="game-container">
+        <!-- TOP BAR: compact header for mobile & desktop -->
+        <div class="top-bar game-header">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <h1 class="game-title" style="margin:0;font-size:18px;">RUNG - Court Piece</h1>
+                <div class="status-message" id="status-message" style="font-weight:600;color:#ffd54f;">Game starting... Select trump suit</div>
+            </div>
+
+            <div class="score-display" style="display:flex;gap:12px;">
+                <!-- ...existing score boxes markup... -->
+                <div class="score-box">
+                    <h5>Team 1 (You & Player 3)</h5>
+                    <div class="score">Points: <span id="team1-points">0</span>/13</div>
+                    <div class="score">Consecutive Wins: <span id="team1-consecutive">0</span></div>
+                </div>
+                <div class="score-box">
+                    <h5>Team 2 (Player 2 & 4)</h5>
+                    <div class="score">Points: <span id="team2-points">0</span>/13</div>
+                    <div class="score">Consecutive Wins: <span id="team2-consecutive">0</span></div>
+                </div>
+
+                <div class="stake-info" style="margin-left:auto;">
+                    <div><strong>Current Stake:</strong> <span id="current-stake">Stake 1 (3 consecutive wins)</span></div>
+                    <div><strong>Stacked Points:</strong> <span id="stacked-points">0</span></div>
+                </div>
+            </div>
+
+            <!-- Player history panels moved into header so they appear in the top section -->
+            <div class="player-history-row">
+                <div id="player1-history" class="player-history-panel" aria-label="Player 1 history"></div>
+                <div id="player2-history" class="player-history-panel" aria-label="Player 2 history"></div>
+                <div id="player3-history" class="player-history-panel" aria-label="Player 3 history"></div>
+                <div id="player4-history" class="player-history-panel" aria-label="Player 4 history"></div>
+            </div>
+        </div>
+
+        <div class="game-table">
+            <div id="table-announcement" class="table-announcement" aria-live="polite"></div>
+            <!-- Top Player -->
+            <div class="player-area player-top">
+                <div class="player-name">Player 3 (Team 1)</div>
+                <div id="player3-cards" class="card-area"></div>
+            </div>
+            
+            <!-- Left Player -->
+            <div class="player-area player-left">
+                <div class="player-name">Player 2 (Team 2)</div>
+                <div id="player2-cards" class="card-area"></div>
+            </div>
+            
+            <!-- Game Center -->
+            <div class="game-center">
+                    <div class="trick-area">
+                    <div id="trump-indicator" class="trump-indicator"></div>
+                    <div id="led-suit-indicator" class="led-suit-indicator"></div>
+                    <div id="table-cards-count" class="table-cards-count">Cards on table: 0</div>
+                </div>
+            </div>
+            
+            <!-- Right Player -->
+            <div class="player-area player-right">
+                <div class="player-name">Player 4 (Team 2)</div>
+                <div id="player4-cards" class="card-area"></div>
+            </div>
+            
+            <!-- Bottom Player (You) -->
+            <div class="player-area player-bottom">
+                <div class="player-name">You (Team 1)</div>
+                <div id="player1-cards" class="card-area"></div>
+            </div>
+
+            <!-- history panels moved to header -->
+        </div>
+        
+        <!-- Stake Display -->
+        <div class="stake-display">
+            Current Stake: <span id="stake-display">1</span>
+        </div>
+        
+        <!-- Sidebar for hand winners -->
+        <div class="sidebar">
+            <h5>Hand Winners</h5>
+            <div id="hand-winners-list"></div>
+        </div>
+        
+        <!-- moved game-info into bottom bar to save screen space on mobile -->
+        <div class="bottom-bar" role="contentinfo">
+            <div id="current-player">Current: You</div>
+            <div id="cards-remaining">Cards in hand: 13</div>
+            <div id="hands-played">Hands played: 0</div>
+            <div style="display:flex;gap:6px;">
+                <button id="chat-toggle-btn" class="btn btn-game" type="button" aria-expanded="false" aria-controls="chat-picker">Reactions</button>
+                <button id="new-game-btn" class="btn btn-game">New Game</button>
+                <button id="rules-btn" class="btn btn-game">How to Play</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="chat-picker" class="chat-picker" role="dialog" aria-label="Player reactions" hidden>
+        <div class="chat-picker-header">
+            <strong>Send a reaction</strong>
+            <button id="chat-close-btn" class="chat-close-btn" type="button" aria-label="Close reactions">×</button>
+        </div>
+        <div class="reaction-picker" aria-label="Emoji reactions">
+            <button class="reaction-choice emoji-choice" type="button" data-reaction="😀">😀</button>
+            <button class="reaction-choice emoji-choice" type="button" data-reaction="😂">😂</button>
+            <button class="reaction-choice emoji-choice" type="button" data-reaction="😮">😮</button>
+            <button class="reaction-choice emoji-choice" type="button" data-reaction="😎">😎</button>
+            <button class="reaction-choice emoji-choice" type="button" data-reaction="🤔">🤔</button>
+            <button class="reaction-choice emoji-choice" type="button" data-reaction="👏">👏</button>
+            <button class="reaction-choice emoji-choice" type="button" data-reaction="🔥">🔥</button>
+            <button class="reaction-choice emoji-choice" type="button" data-reaction="❤️">❤️</button>
+        </div>
+        <div id="custom-emojis" class="reaction-picker" aria-label="Your custom emojis"></div>
+        <form id="custom-emoji-form" class="custom-emoji-form">
+            <input id="custom-emoji-input" type="text" maxlength="8" aria-label="Custom emoji" placeholder="Add emoji">
+            <button class="btn btn-game" type="submit">Add</button>
+        </form>
+        <div class="predefined-messages" aria-label="Quick messages">
+            <button class="reaction-choice message-choice" type="button" data-reaction="Well played!">Well played!</button>
+            <button class="reaction-choice message-choice" type="button" data-reaction="Good luck!">Good luck!</button>
+            <button class="reaction-choice message-choice" type="button" data-reaction="Nice move!">Nice move!</button>
+            <button class="reaction-choice message-choice" type="button" data-reaction="Oops!">Oops!</button>
+        </div>
+        <form id="custom-message-form" class="custom-message-form">
+            <input id="custom-message-input" type="text" maxlength="80" aria-label="Custom message" placeholder="Write a message">
+            <button class="btn btn-game" type="submit">Send</button>
+        </form>
+    </div>
+
+    <!-- Trump selection overlay: shown after initial 5-card deal -->
+    <div id="trump-selection" class="trump-selection" style="display:none;">
+        <div class="trump-modal">
+             <div class="trump-options">
+                 <button class="trump-btn" data-suit="hearts">♥</button>
+                 <button class="trump-btn" data-suit="diamonds">♦</button>
+                 <button class="trump-btn" data-suit="clubs">♣</button>
+                 <button class="trump-btn" data-suit="spades">♠</button>
+             </div>
+        </div>
+    </div>
+    
+    <!-- Celebration Modal -->
+    <div id="celebration" class="celebration" style="display: none;">
+        <div class="trophy">
+            <i class="fas fa-trophy"></i>
+        </div>
+        <div class="win-message" id="win-message"></div>
+        <div class="steak-display" id="steak-display"></div>
+        <!-- Rules container (reused to show help or the game-over rules) -->
+        <div id="rules-content" style="max-width:720px; padding:12px; color:#fff; display:none;"></div>
+        <button id="play-again-btn" class="btn btn-game btn-lg">Play Again</button>
+    </div>
+
+    <!-- Bootstrap & jQuery -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,1040 @@
+:root {
+    --card-width: 80px;
+    --card-height: 120px;
+    --primary-color: #2c5e1a;
+    --secondary-color: #f8f9fa;
+    --accent-color: #ffc107;
+}
+
+body {
+    background: linear-gradient(to bottom, #1a3a1a, #2c5e1a);
+    color: white;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+
+}
+    /* filepath: c:\Users\eh22.EH\Downloads\Rung\index.html (inline responsive tweaks) */
+    /* top and bottom bar for mobile */
+    .top-bar {
+        display:flex;
+        flex-direction:column;
+        gap:8px;
+        padding:10px;
+    }
+    .bottom-bar {
+        position:fixed;
+        left:0;
+        right:0;
+        bottom:0;
+        z-index:1200;
+        background:rgba(0,0,0,0.6);
+        color:#fff;
+        padding:10px;
+        display:flex;
+        gap:10px;
+        align-items:center;
+        justify-content:space-between;
+    }
+    .game-table { padding-top:16px; padding-bottom:110px; } /* space for bars */
+    /* history list: vertical, scrollable */
+    .history-list {
+        display:block;
+        max-height:120px;
+        overflow-y:auto;
+        margin-top:6px;
+        padding:6px;
+        background:rgba(255,255,255,0.06);
+        border-radius:6px;
+        border:1px solid rgba(255,255,255,0.04);
+    }
+    .history-list .mini-play {
+        display:block;
+        margin-bottom:6px;
+        padding:6px 8px;
+        border-radius:4px;
+        background:#fff;
+        color:#000;
+        font-size:13px;
+    }
+    /* compact score boxes on small screens */
+    @media (max-width:768px) {
+        .score-display { flex-direction:row; gap:8px; overflow:auto; }
+        .score-box { min-width:140px; }
+    }
+
+
+.game-container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.game-header {
+    position: relative; /* allows contained layout and stacking */
+    text-align: center;
+    margin-bottom: 20px;
+    background: rgba(0, 0, 0, 0.3);
+    padding: 15px;
+    border-radius: 10px;
+}
+
+.game-title {
+    font-size: 2.5rem;
+    font-weight: bold;
+    margin-bottom: 10px;
+    color: var(--accent-color);
+}
+
+.game-table {
+    position: relative;
+    width: 100%;
+    height: 800px;
+    /* use image background (fallback to gradient below) */
+    background-image: url('https://wallpapers.com/images/high/empty-poker-table-top-view-k2208fpr8q1ecp14.png'), linear-gradient(to bottom, #1e7e34, #2c5e1a);
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    border-radius: 20px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    margin: 20px 0;
+    overflow: hidden;
+    border: 10px solid #8B4513;
+}
+
+.player-area {
+    position: absolute;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    box-sizing: border-box;
+    border: 2px solid transparent;
+    border-radius: 14px;
+}
+
+.player-area.is-current-turn {
+    animation: current-turn-border 1.2s ease-in-out infinite;
+}
+
+.player-area.last-played-player:not(.is-current-turn) {
+    border-color: #5fdcff;
+    box-shadow: 0 0 12px rgba(95, 220, 255, 0.65);
+}
+
+@keyframes current-turn-border {
+    0%, 100% {
+        border-color: rgba(255, 213, 79, 0.35);
+        box-shadow: 0 0 8px rgba(255, 213, 79, 0.25);
+    }
+    50% {
+        border-color: #ffd54f;
+        box-shadow: 0 0 20px rgba(255, 213, 79, 0.9);
+    }
+}
+
+@keyframes last-played-border {
+    0%, 100% {
+        border-color: rgba(95, 220, 255, 0.35);
+        box-shadow: 0 0 8px rgba(95, 220, 255, 0.25);
+    }
+    50% {
+        border-color: #5fdcff;
+        box-shadow: 0 0 18px rgba(95, 220, 255, 0.8);
+    }
+}
+
+.player-bottom {
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 80%;
+    height: 180px;
+}
+
+.player-left {
+    left: 20px;
+    top: 50%;
+    width: 180px;
+    height: 80%;
+    transform: translateY(-50%);
+    flex-direction: column;
+}
+
+.player-top {
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 80%;
+    height: 180px;
+}
+
+.player-right {
+    right: 0px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 180px;
+    height: 80%;
+    flex-direction: column;
+    }
+
+.player-name {
+    position: absolute;
+    padding: 5px 15px;
+    background: rgba(0, 0, 0, 0.7);
+    border-radius: 20px;
+    font-weight: bold;
+    z-index: 10;
+    font-size: 14px;
+}
+
+.player-bottom .player-name {
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.player-left .player-name {
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.player-top .player-name {
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.player-right .player-name {
+    top: 10px;
+    right: 50%;
+    transform: translateX(50%);
+}
+
+.card-area {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+    height: 100%;
+}
+
+.card {
+    width: var(--card-width);
+    height: var(--card-height);
+    background-color: white;
+    border-radius: 8px;
+    position: absolute;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+    transition: transform 0.3s, box-shadow 0.3s, top 0.3s, left 0.3s;
+    cursor: pointer;
+    color: black;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 5px;
+    border: 1px solid #ccc;
+}
+
+.card:hover {
+    transform: translateY(-10px);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+}
+
+.card.selected {
+    transform: translateY(-20px);
+    box-shadow: 0 0 15px var(--accent-color);
+}
+
+.card-back {
+    /* use an image for the back of the card instead of the colored gradient and question mark */
+    background-image: url('https://i.pinimg.com/736x/81/c0/44/81c044d4553049ecbc09296ca53b2eae.jpg');
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    /* keep same sizing and appearance as regular card but no inner icon */
+    display: block;
+    width: var(--card-width);
+    height: var(--card-height);
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    border: 1px solid #ccc;
+}
+
+.card-top, .card-bottom {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 5px;
+}
+
+.card-bottom {
+    display: none !important;
+    transform: rotate(180deg);
+    align-items: flex-end;
+}
+
+.card-rank {
+    font-size: 18px;
+    font-weight: bold;
+    line-height: 1;
+}
+
+.card-suit {
+    font-size: 20px;
+    line-height: 1;
+}
+
+.card-center {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 40px;
+}
+
+.suit-red {
+    color: #e74c3c;
+}
+
+.suit-black {
+    color: #2c3e50;
+}
+
+.game-center {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 300px;
+    height: 300px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.trick-area {
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+.played-card {
+    position: absolute;
+    transition: all 0.5s;
+}
+
+.played-card.last-played-card {
+    border: 3px solid #ffd54f;
+    animation: last-played-card-glow 1.2s ease-in-out infinite;
+}
+
+.play-sequence {
+    position: absolute;
+    top: -9px;
+    right: -9px;
+    z-index: 5;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border: 1px solid #fff;
+    border-radius: 50%;
+    background: #202020;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+@keyframes last-played-card-glow {
+    0%, 100% {
+        box-shadow: 0 0 8px rgba(255, 213, 79, 0.45), 0 4px 8px rgba(0, 0, 0, 0.3);
+    }
+    50% {
+        box-shadow: 0 0 20px rgba(255, 213, 79, 0.95), 0 4px 8px rgba(0, 0, 0, 0.3);
+    }
+}
+
+.game-info {
+    background: rgba(0, 0, 0, 0.5);
+    padding: 15px;
+    border-radius: 10px;
+    margin-top: 20px;
+}
+
+.trump-indicator {
+    font-size: 24px;
+    text-align: center;
+    margin: 10px 0;
+    background: transparent !important;
+    color: var(--accent-color);
+    font-weight: 600;
+    padding: 10px;
+    border-radius: 10px;
+}
+
+.status-message {
+    font-size: 0.95rem;
+    text-align: center;
+    margin: 10px 0;
+    min-height: 26px;
+    color: var(--accent-color);
+    font-weight: bold;
+}
+
+.score-display {
+    display: flex;
+    justify-content: space-around;
+    margin: 15px 0;
+}
+
+.score-box {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 6px 10px;
+    border-radius: 5px;
+    text-align: center;
+    padding: 8px 12px;
+    font-size: 12px;
+}
+
+.stake-info {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 10px;
+    border-radius: 5px;
+    margin: 10px 0;
+}
+
+.rules-panel {
+    background: rgba(0, 0, 0, 0.5);
+    padding: 15px;
+    border-radius: 10px;
+    margin-top: 20px;
+}
+
+.btn-game {
+    background-color: var(--accent-color);
+    color: #000;
+    font-weight: bold;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 5px;
+    transition: all 0.3s;
+}
+
+.btn-game:hover {
+    background-color: #e0a800;
+    transform: scale(1.05);
+}
+
+.led-suit-indicator {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 5px 10px;
+    border-radius: 5px;
+    font-size: 14px;
+}
+
+/* 1) Card counts:
+   - keep per-hand card-count hidden (was causing overlap)
+   - show a compact counter only on cards that are played to the table (.played-card .card-count)
+*/
+.card-count {
+    display: none !important; /* keep hidden by default */
+}
+.played-card .card-count {
+    display: flex !important;
+    position: absolute;
+    right: 6px;
+    bottom: 6px;
+    background: rgba(0,0,0,0.75);
+    color: #fff;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    z-index: 2000;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+}
+
+/* 2) Top section spacing & reduced fonts so header leaves room */
+.game-header {
+    padding: 10px;
+}
+.game-title {
+    font-size: 1.25rem; /* reduced */
+    margin-bottom: 6px;
+}
+.status-message {
+    font-size: 0.95rem;
+    min-height: 26px;
+}
+
+/* Slightly smaller score boxes to save vertical space */
+.score-box { padding: 6px 10px; font-size: 12px; }
+
+/* 3) Move player-history panels out of corners into a single top row across the table */
+.player-history-panel {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 8px;
+    width: auto;
+    max-width: calc(100% - 40px);
+    background: transparent; /* panels themselves will remain visible via inner boxes */
+    box-shadow: none;
+    border: 0;
+    padding: 0;
+}
+
+/* inside the container keep each mini box styled as before but more compact */
+.player-history-panel > .mini-play,
+.player-history-panel .mini-play {
+    display: inline-block;
+    padding: 6px 8px;
+    margin: 0 6px;
+    border-radius: 6px;
+    background: rgba(255,255,255,0.95);
+    color: #000;
+    font-size: 12px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+}
+
+.game-table > .player-history-panel {
+    z-index: 1250;
+    display: flex;
+    align-items: center;
+    width: auto;
+    max-width: 92px;
+    min-height: 24px;
+    max-height: none;
+    overflow: hidden;
+    padding: 2px 4px;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.88);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    font-size: 11px;
+}
+
+.game-table > .player-history-panel .mini-play {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    box-shadow: none;
+    white-space: nowrap;
+    font-size: 11px;
+}
+
+.play-log-number {
+    color: #555;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.game-table > #player1-history { top: auto; right: auto; bottom: 2%; left: 2%; }
+.game-table > #player2-history { top: 2%; right: auto; bottom: auto; left: 2%; }
+.game-table > #player3-history { top: 2%; right: 2%; bottom: auto; left: auto; }
+.game-table > #player4-history { top: auto; right: 2%; bottom: 2%; left: auto; }
+
+.player-reaction {
+    position: absolute;
+    z-index: 1500;
+    top: 12%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    max-width: 180px;
+    padding: 7px 11px;
+    border: 2px solid rgba(255, 213, 79, 0.9);
+    border-radius: 18px;
+    background: rgba(20, 20, 20, 0.94);
+    color: #fff;
+    font-size: 24px;
+    line-height: 1.2;
+    text-align: center;
+    white-space: nowrap;
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+    animation: reaction-pop 0.25s ease-out;
+}
+
+@keyframes reaction-pop {
+    from { opacity: 0; scale: 0.7; }
+    to { opacity: 1; scale: 1; }
+}
+
+.table-announcement {
+    position: absolute;
+    z-index: 1550;
+    top: 42%;
+    left: 50%;
+    max-width: min(80%, 420px);
+    padding: 8px 14px;
+    transform: translate(-50%, -50%) scale(0.92);
+    border: 1px solid rgba(255, 213, 79, 0.8);
+    border-radius: 20px;
+    background: rgba(0, 0, 0, 0.82);
+    color: #fff;
+    font-weight: 600;
+    text-align: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.table-announcement.is-visible {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+}
+
+.chat-picker {
+    position: fixed;
+    z-index: 1800;
+    right: 12px;
+    bottom: 76px;
+    display: grid;
+    gap: 10px;
+    width: min(340px, calc(100vw - 24px));
+    max-height: min(70vh, 520px);
+    overflow-y: auto;
+    padding: 12px;
+    border: 1px solid rgba(255, 213, 79, 0.65);
+    border-radius: 12px;
+    background: rgba(20, 28, 20, 0.98);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.5);
+}
+
+.chat-picker[hidden] {
+    display: none;
+}
+
+.chat-picker-header,
+.custom-emoji-form,
+.custom-message-form,
+.reaction-picker,
+.predefined-messages {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.chat-picker-header {
+    justify-content: space-between;
+}
+
+.chat-close-btn,
+.reaction-choice {
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    cursor: pointer;
+}
+
+.chat-close-btn {
+    width: 28px;
+    height: 28px;
+    font-size: 20px;
+    line-height: 1;
+}
+
+.reaction-picker,
+.predefined-messages {
+    flex-wrap: wrap;
+}
+
+.emoji-choice {
+    min-width: 38px;
+    min-height: 36px;
+    font-size: 22px;
+}
+
+.message-choice {
+    padding: 5px 8px;
+    font-size: 12px;
+}
+
+.custom-emoji-form input,
+.custom-message-form input {
+    min-width: 0;
+    flex: 1;
+    padding: 7px 8px;
+    border: 1px solid #aaa;
+    border-radius: 6px;
+}
+
+.bottom-bar {
+    flex-wrap: wrap;
+}
+
+@media (max-width: 768px) {
+    .game-table > .player-history-panel {
+        max-width: 78px;
+        min-height: 20px;
+        padding: 1px 3px;
+    }
+
+    .game-table > .player-history-panel .mini-play {
+        gap: 3px;
+        font-size: 10px;
+    }
+
+    .play-log-number {
+        font-size: 9px;
+    }
+
+    .bottom-bar {
+        gap: 5px;
+        padding: 6px;
+        font-size: 12px;
+    }
+}
+
+/* place each player's single short panel in the top row by using data-player attribute if present */
+#player1-history { transform: translateX(calc(-50% - 270px)); }
+#player2-history { transform: translateX(calc(-50% - 90px)); }
+#player3-history { transform: translateX(calc(-50% + 90px)); }
+#player4-history { transform: translateX(calc(-50% + 270px)); }
+
+/* Defensive: ensure panels don't overlap center area on narrow screens — collapse spacing */
+@media (max-width: 900px) {
+    #player1-history { transform: translateX(calc(-50% - 200px)); }
+    #player2-history { transform: translateX(calc(-50% - 70px)); }
+    #player3-history { transform: translateX(calc(-50% + 70px)); }
+    #player4-history { transform: translateX(calc(-50% + 200px)); }
+}
+@media (max-width: 520px) {
+    /* stack into two rows on very narrow screens */
+    #player1-history, #player2-history, #player3-history, #player4-history {
+        top: 6px;
+        transform: translateX(-50%);
+        left: 50%;
+    }
+    .player-history-panel { flex-direction: column; gap:6px; max-width: 280px; }
+    #player1-history { order: 0; }
+    #player2-history { order: 1; }
+    #player3-history { order: 2; }
+    #player4-history { order: 3; }
+}
+
+/* 4) Hide card-rank for cards in player's hands (keep ranks visible for played cards).
+   This removes "card name" clutter from hands but retains information on the table.
+*/
+/* remove the hiding of card ranks/suits for hands so distributed cards show correctly */
+/* (previous rules that hid .card:not(.played-card) .card-rank and .card-suit have been removed) */
+
+/* ensure played cards still display rank/suit (no-op if default) */
+.played-card .card-rank,
+.played-card .card-suit {
+    display: block;
+}
+
+/* 5) Keep trump icons visually prominent (colors already applied). Ensure trump buttons stay large on mobile */
+.trump-btn {
+    /* preserve existing style; no changes needed here */
+}
+
+/* 6) Splash / celebration styling: ensure strong, centered overlay like before */
+.celebration {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.95);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 1600;
+}
+
+/* Hide card-count badges (removed from UI) */
+.card-count {
+    display: none !important;
+}
+
+/* Exact placement for each player history panel (desktop/default) */
+#player1-history { /* bottom-right kept for desktop */ bottom: 5%; right: 10%; left: auto; top: auto; }
+#player2-history { top: 5%; right: 10%; left: auto; bottom: auto; }
+#player3-history { top: 5%; left: 10%; right: auto; bottom: auto; }
+#player4-history { bottom: 5%; left: 10%; top: auto; right: auto; }
+
+/* New: visual wrapper that holds the four player history panels inline in the header */
+.player-history-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+
+/* Panels now render inline within header; make them compact */
+.player-history-row .player-history-panel {
+    position: static !important;
+    width: auto;
+    max-width: 220px;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid rgba(0,0,0,0.08);
+    padding: 6px;
+    border-radius: 6px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+    font-size: 12px;
+    display: block;
+}
+
+/* Override any previous absolute placements for these panels when inside header */
+.game-header #player1-history,
+.game-header #player2-history,
+.game-header #player3-history,
+.game-header #player4-history {
+    transform: none !important;
+    top: auto !important;
+    left: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+}
+
+/* Remove corner-specific layout for desktop by de-prioritizing old selectors */
+#player1-history, #player2-history, #player3-history, #player4-history {
+    /* default fallback is handled by .player-history-row rules when moved */
+}
+
+/* On small screens keep them compact and wrapped */
+@media (max-width: 520px) {
+    .player-history-row {
+        gap: 6px;
+        margin-top: 6px;
+    }
+    .player-history-row .player-history-panel {
+        max-width: 140px;
+        padding: 4px;
+        font-size: 11px;
+    }
+}
+
+@media (max-width: 1200px) {
+    .sidebar {
+        position: relative;
+        right: auto;
+        top: auto;
+        width: 100%;
+        margin-top: 20px;
+        max-height: 200px;
+    }
+}
+
+@media (max-width: 768px) {
+    :root {
+        --card-width: 60px;
+        --card-height: 90px;
+    }
+    
+    .game-table {
+        height: 500px;
+    }
+    
+    .player-bottom, .player-top {
+        height: 140px;
+    }
+    
+    .player-left, .player-right {
+        width: 140px;
+    }
+    
+    .game-title {
+        font-size: 1.8rem;
+    }
+    
+    .card-rank {
+        font-size: 14px;
+    }
+    
+    .card-suit {
+        font-size: 16px;
+    }
+    
+    .card-center {
+        font-size: 30px;
+    }
+    
+    .win-message {
+        font-size: 2rem;
+    }
+    
+    .trophy {
+        font-size: 70px;
+    }
+    
+    /* Make top info compact on small screens */
+    .top-bar {
+        padding: 8px 10px;
+        gap: 6px;
+    }
+    .top-bar .game-title {
+        font-size: 16px;
+        margin: 0;
+    }
+    .score-box { padding: 8px 12px; font-size: 13px; }
+
+    /* Trump indicator transparent background */
+    .trump-indicator {
+        background: transparent !important;
+        color: var(--accent-color);
+        font-weight: 600;
+    }
+
+    /* Mobile-specific tighter layout */
+    @media (max-width: 768px) {
+        .top-bar { padding: 6px; gap:6px; }
+        .score-box { padding: 6px 8px; min-width: 120px; font-size: 12px; }
+        .stake-info { padding: 6px; font-size: 12px; }
+        .status-message { font-size: 1rem; }
+    }
+}
+
+/* History panel styling: centralized, absolute-positioned within .game-table */
+.player-history-panel {
+    position: absolute;
+    z-index: 1200;
+    width: 150px;
+    max-height: 35%;
+    overflow-y: auto;
+    background: rgba(255,255,255,0.95);
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 6px;
+    padding: 6px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+    display: block;
+    font-size: 13px;
+}
+
+/* Exact placement for each player history panel */
+#player1-history { bottom: 0%; right: 0%; left: auto; top: auto; } /* bottom-right */
+#player2-history { top: 0%; right: 0%; left: auto; bottom: auto; }    /* top-right */
+#player3-history { top: 0%; left: 0%; right: auto; bottom: auto; }     /* top-left */
+#player4-history { bottom: 0%; left: 0%; top: auto; right: auto; }     /* bottom-left */
+
+/* Make items inside the panel consistent */
+.player-history-panel .mini-play {
+    display: block;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    border-radius: 4px;
+    background: #fff;
+    color: #000;
+    font-size: 13px;
+}
+
+/* Mini-play / mobile: pin history panels to table edges for each player */
+@media (max-width: 768px) {
+    .player-history-panel {
+        width: 110px;
+        max-height: 24%;
+        padding: 6px;
+        font-size: 12px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.12);
+        background: rgba(255,255,255,0.96);
+        pointer-events: auto;
+        z-index: 1300;
+    }
+
+    /* nudge panels slightly outside so they don't cover the player's cards */
+    #player1-history { right: -6%; bottom: -6%; left: auto; top: auto; border-radius: 6px 0 0 6px; }
+    #player2-history { right: -6%; top: -6%; left: auto; bottom: auto; border-radius: 6px 0 0 6px; }
+    #player3-history { left: -6%; top: -6%; right: auto; bottom: auto; border-radius: 0 6px 6px 0; }
+    #player4-history { left: -6%; bottom: -6%; right: auto; top: auto; border-radius: 0 6px 6px 0; }
+
+    /* reduce item padding to keep panels compact */
+    .player-history-panel .mini-play {
+        padding: 4px 6px;
+        margin-bottom: 4px;
+        font-size: 12px;
+    }
+}
+
+/* Keep each player's recent-play panel beside that player's seat. */
+#player1-history { top: auto; right: auto; bottom: 2%; left: 2%; transform: none; }
+#player2-history { top: 2%; right: auto; bottom: auto; left: 2%; transform: none; }
+#player3-history { top: 2%; right: 2%; bottom: auto; left: auto; transform: none; }
+#player4-history { top: auto; right: 2%; bottom: 2%; left: auto; transform: none; }
+
+@media (max-width: 768px) {
+    #player1-history { top: auto; right: auto; bottom: 2%; left: 2%; }
+    #player2-history { top: 2%; right: auto; bottom: auto; left: 2%; }
+    #player3-history { top: 2%; right: 2%; bottom: auto; left: auto; }
+    #player4-history { top: auto; right: 2%; bottom: 2%; left: auto; }
+}
+
+/* Trump selection overlay */
+.trump-selection {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.65);
+    z-index: 1400;
+}
+.trump-modal {
+    background: rgba(20,20,20,0.95);
+    padding: 18px;
+    border-radius: 10px;
+    color: #fff;
+    text-align: center;
+    min-width: 280px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+}
+.trump-modal h4 { margin: 0 0 8px 0; color: var(--accent-color); }
+.trump-options { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-bottom:8px; }
+.trump-btn {
+    background: #fff;
+    color: #111;
+    border: 2px solid rgba(0,0,0,0.08);
+    padding: 12px 18px;
+    border-radius: 10px;
+    font-size: 22px;
+    font-weight: 700;
+    cursor: pointer;
+    min-width: 120px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+    transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+.trump-btn:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 10px 22px rgba(0,0,0,0.28);
+}
+
+/* Suit-specific colors */
+.trump-btn[data-suit="hearts"],
+.trump-btn[data-suit="diamonds"] {
+    color: #e74c3c;
+    border-color: rgba(231,76,60,0.18);
+}
+.trump-btn[data-suit="clubs"],
+.trump-btn[data-suit="spades"] {
+    color: #2c3e50;
+    border-color: rgba(44,62,80,0.12);
+}
+
+/* Slightly larger icon-only display on small screens too */
+@media (max-width: 480px) {
+    .trump-btn {
+        font-size: 20px;
+        padding: 10px 14px;
+        min-width: 90px;
+    }
+}
