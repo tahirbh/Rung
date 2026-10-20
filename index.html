@@ -116,7 +116,7 @@
                 <div id="room-seat-list" class="room-seat-list"></div>
                 <section id="room-requests-section" class="room-requests-section" hidden aria-labelledby="room-requests-title">
                     <h3 id="room-requests-title">Player requests</h3>
-                    <p>Approve a guest and choose which bot seat they will replace.</p>
+                    <p>The first approved player replaces Player 3 and partners the host. Later players take an open bot seat. Public viewers are admitted automatically.</p>
                     <div id="room-requests-list" class="room-requests-list"></div>
                 </section>
                 <div class="room-lobby-actions">
@@ -129,6 +129,15 @@
             </div>
         </section>
     </main>
+
+    <aside id="host-join-notice" class="host-join-notice" role="status" aria-live="assertive" hidden>
+        <span id="host-join-notice-text"></span>
+        <div class="host-join-notice-actions">
+            <button id="enable-host-notifications" type="button" hidden>Enable desktop alerts</button>
+            <button id="host-join-notice-open" type="button">Review request</button>
+            <button id="host-join-notice-dismiss" type="button" aria-label="Dismiss notification">×</button>
+        </div>
+    </aside>
 
     <div class="game-container">
         <!-- TOP BAR: compact header for mobile & desktop -->
@@ -277,7 +286,7 @@
     </div>
 
     <!-- Trump selection overlay: shown after initial 5-card deal -->
-    <div id="trump-selection" class="trump-selection" style="display:none;">
+    <div id="trump-selection" class="trump-selection" aria-hidden="true">
         <div class="trump-modal" role="dialog" aria-modal="true" aria-labelledby="trump-selection-title">
              <h4 id="trump-selection-title">Choose the trump suit</h4>
              <div class="trump-options">

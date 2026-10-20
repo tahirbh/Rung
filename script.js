@@ -55,6 +55,8 @@ const SUITS = ['hearts', 'diamonds', 'clubs', 'spades'];
 const SUIT_SYMBOLS = {'hearts': '♥', 'diamonds': '♦', 'clubs': '♣', 'spades': '♠'};
 const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
 const RANK_VALUES = { '2': 0, '3': 1, '4': 2, '5': 3, '6': 4, '7': 5, '8': 6, '9': 7, '10': 8, 'J': 9, 'Q': 10, 'K': 11, 'A': 12 };
+const ONLINE_TURN_TIMEOUT_MS = 15000;
+const MAX_MISSED_TURNS = 3;
 const AI_REACTIONS = ['😎', '😅', '🤔', '🔥', '👏', '😮', '😂', '❤️', 'Unlucky!'];
 const PUNJABI_BOT_LINES = [
     { text: 'ਸਾਥੀ, ਹੁਣ ਆਪਣੀ ਚਾਲ ਸੋਚ ਸਮਝ ਕੇ ਖੇਡੋ!', cue: 'partner' },
@@ -110,6 +112,7 @@ const onlineState = {
     publishedGameKey: null,
     lastBotBanterId: null,
     pendingRequests: new Map(),
+    notifiedRequestKeys: new Set(),
     requestTimer: null,
     pendingRoom: null,
     pendingRoomCode: null,
@@ -230,6 +233,12 @@ $(document).ready(function() {
     $('#cancel-room-request-btn').on('click', cancelRoomRequest);
     $('#room-requests-list').on('click', '[data-approve-request]', approveRoomRequest);
     $('#room-requests-list').on('click', '[data-reject-request]', rejectRoomRequest);
+    $('#host-join-notice-open').on('click', () => {
+        $('#host-join-notice').prop('hidden', true);
+        if (onlineState.isHost && onlineState.room) showRoomLobby(onlineState.room);
+    });
+    $('#host-join-notice-dismiss').on('click', () => $('#host-join-notice').prop('hidden', true));
+    $('#enable-host-notifications').on('click', enableHostNotifications);
     $('#lobby-btn').on('click', returnToLobby);
     $('#table-admin-btn').on('click', () => {
         if (onlineState.isHost && onlineState.room) showRoomLobby(onlineState.room);
@@ -253,7 +262,12 @@ $(document).ready(function() {
         refreshHallOfFame();
         refreshPublicTables();
         refreshMyRunningTables();
-        setTimeout(showHallOfFame, 900);
+        setTimeout(() => {
+            const stillOnSplash = !$('#splash-screen').prop('hidden');
+            const gameIsActive = $('.game-container').hasClass('is-active');
+            const roomLobbyIsOpen = !$('#room-lobby').prop('hidden');
+            if (stillOnSplash && !gameIsActive && !roomLobbyIsOpen) showHallOfFame();
+        }, 900);
     });
     window.rungFirebaseReady?.catch(error => {
         console.error('Firebase initialization failed:', error);
@@ -335,7 +349,20 @@ async function firebaseApi() {
     return window.rungFirebaseReady;
 }
 
+function openTrumpSelection() {
+    if (gameState.gameState !== 'TRUMP_SELECTION' ||
+        !$('.game-container').hasClass('is-active')) return;
+    $('#trump-selection').addClass('is-visible').attr('aria-hidden', 'false');
+    $('.game-table').addClass('is-trump-selection');
+}
+
+function closeTrumpSelection() {
+    $('#trump-selection').removeClass('is-visible').attr('aria-hidden', 'true');
+    $('.game-table').removeClass('is-trump-selection');
+}
+
 async function showHallOfFame() {
+    closeTrumpSelection();
     $('#rung-app').addClass('is-screen-visible');
     $('#splash-screen').prop('hidden', true);
     $('#lobby-screen').prop('hidden', false);
@@ -958,6 +985,7 @@ function configureHostRoom(room) {
     onlineState.publishedGameKey = null;
     onlineState.roomUnsubscribe = null;
     onlineState.pendingRequests = new Map();
+    onlineState.notifiedRequestKeys = new Set();
     const user = window.rungFirebase.user;
     room.seats.forEach((seat, index) => {
         const player = gameState.players[index];
@@ -974,12 +1002,34 @@ function configureHostRoom(room) {
     const firebase = window.rungFirebase;
     onlineState.requestsUnsubscribe = firebase.listenRequests(room.id, (requestSnapshot, changeType) => {
         const request = requestSnapshot.data();
+        const requestKey = `${requestSnapshot.id}:${request.createdAt?.seconds || 0}:` +
+            `${request.createdAt?.nanoseconds || 0}`;
         if (changeType === 'removed' || request.status !== 'pending') {
             onlineState.pendingRequests.delete(request.uid);
             renderPendingRequests();
+            if (!onlineState.pendingRequests.size) {
+                $('#table-admin-btn').removeClass('has-join-requests').removeAttr('aria-label');
+            }
+            if (onlineState.pendingRequests.size) {
+                showNextPendingRequestNotice();
+            } else if (onlineState.notifiedRequestKeys.has(requestKey) &&
+                request.role === 'viewer' && request.status === 'accepted') {
+                $('#host-join-notice-text').text(`${request.name || 'A viewer'} joined to watch the table.`);
+                $('#host-join-notice-open').text('Open table');
+                $('#host-join-notice').prop('hidden', false);
+            } else if (changeType === 'removed' ||
+                (onlineState.notifiedRequestKeys.has(requestKey) &&
+                    (request.status === 'accepted' || request.status === 'rejected'))) {
+                $('#host-join-notice').prop('hidden', true);
+            }
+            if (changeType === 'removed') onlineState.notifiedRequestKeys.delete(requestKey);
             return;
         }
         if (request.uid === user.uid) return;
+        if (!onlineState.notifiedRequestKeys.has(requestKey)) {
+            onlineState.notifiedRequestKeys.add(requestKey);
+            notifyHostOfJoinRequest(request);
+        }
         if (request.role === 'viewer') {
             onlineState.actionQueue = onlineState.actionQueue.then(() =>
                 firebase.acceptRequest(room.id, request.uid))
@@ -1007,6 +1057,16 @@ function configureHostRoom(room) {
 function subscribeToRoom(roomId) {
     onlineState.roomUnsubscribe?.();
     onlineState.roomUnsubscribe = window.rungFirebase.listenRoom(roomId, room => {
+        if (onlineState.isReplica && !onlineState.isViewer &&
+            Number.isInteger(onlineState.seatIndex) &&
+            room.seats?.[onlineState.seatIndex]?.uid !== window.rungFirebase.user.uid) {
+            const removedName = gameState.players[onlineState.seatIndex]?.name || 'Player';
+            leaveRoomLobby();
+            returnToLobby();
+            $('#firebase-status').text(`${removedName}, your seat was returned to a bot after repeated timeouts.`)
+                .addClass('is-error');
+            return;
+        }
         onlineState.room = room;
         if (onlineState.isHost) {
             room.seats.forEach((seat, index) => {
@@ -1019,6 +1079,7 @@ function subscribeToRoom(roomId) {
             });
             onlineState.room = room;
         }
+        if (onlineState.voiceStream) syncVoicePeers(room);
         renderRoomLobby(room);
         if (room.status === 'PLAYING' && onlineState.isReplica && room.publicState) {
             showGameScreen();
@@ -1061,16 +1122,28 @@ function renderPendingRequests() {
     const section = $('#room-requests-section').prop('hidden', !isHost || pending.length === 0);
     if (!section.length) return;
     const list = $('#room-requests-list').empty();
-    pending.forEach(([uid, request]) => {
+    pending.sort(([, first], [, second]) => {
+        const preferredSeat = request => request.role === 'player' &&
+            onlineState.room?.seats?.[2]?.isBot ? 0 : 1;
+        return preferredSeat(first) - preferredSeat(second);
+    }).forEach(([uid, request]) => {
         const row = $('<div class="room-request-item"></div>');
-        row.append($('<strong></strong>').text(request.name || 'Guest'));
+        row.append($('<strong></strong>').text(
+            `${request.role === 'viewer' ? 'Viewer' : 'Player'} request · ${request.name || 'Guest'}`
+        ));
         if (request.playerId) {
             row.append($('<span class="room-request-note"></span>').text(request.playerId));
         }
         const seatSelect = $('<select class="room-request-seat" aria-label="Bot seat to replace"></select>');
-        (onlineState.room?.seats || []).forEach((seat, index) => {
+        const seats = (onlineState.room?.seats || []).map((seat, index) => ({ seat, index }));
+        seats.sort((first, second) => {
+            const preferred = item => item.index === 2 ? 0 : item.index;
+            return preferred(first) - preferred(second);
+        }).forEach(({ seat, index }) => {
             if (seat.isBot) {
-                seatSelect.append($('<option></option>').val(index).text(`Replace ${seat.name}`));
+                const role = index === 2 ? ' · host partner' : '';
+                seatSelect.append($('<option></option>').val(index)
+                    .text(`Replace ${seat.name}${role}`));
             }
         });
         if (seatSelect.children().length) {
@@ -1086,6 +1159,71 @@ function renderPendingRequests() {
     });
 }
 
+function notifyHostOfJoinRequest(request) {
+    const isViewer = request.role === 'viewer';
+    const message = isViewer
+        ? `${request.name || 'A viewer'} wants to watch the table.`
+        : `${request.name || 'A player'} is waiting for approval to join.`;
+    $('#host-join-notice-text').text(message);
+    $('#host-join-notice-open').text(isViewer ? 'Open table' : 'Review request');
+    $('#host-join-notice').prop('hidden', false);
+    if (!isViewer) {
+        $('#table-admin-btn').addClass('has-join-requests')
+            .attr('aria-label', `${message} Open table requests.`);
+    }
+
+    $('#enable-host-notifications').prop('hidden',
+        !('Notification' in window) || Notification.permission !== 'default');
+    showDesktopHostNotification(message, request.uid);
+}
+
+function showNextPendingRequestNotice() {
+    const pending = [...onlineState.pendingRequests.values()];
+    const request = pending[0];
+    if (!request) return;
+    const message = pending.length > 1
+        ? `${request.name || 'A player'} and ${pending.length - 1} more player request(s) need approval.`
+        : `${request.name || 'A player'} is waiting for approval to join.`;
+    $('#host-join-notice-text').text(message);
+    $('#host-join-notice-open').text('Review request');
+    $('#host-join-notice').prop('hidden', false);
+    $('#table-admin-btn').addClass('has-join-requests')
+        .attr('aria-label', `${message} Open table requests.`);
+}
+
+function showDesktopHostNotification(message, requestUid) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    try {
+        const notification = new Notification('RUNG table request', {
+            body: message,
+            tag: `rung-join-${onlineState.roomId}-${requestUid}`
+        });
+        notification.onclick = () => {
+            window.focus();
+            $('#host-join-notice').prop('hidden', true);
+            if (onlineState.isHost && onlineState.room) showRoomLobby(onlineState.room);
+        };
+    } catch (error) {
+        console.error('The desktop table-request notification could not be shown:', error);
+    }
+}
+
+async function enableHostNotifications() {
+    if (!('Notification' in window)) return;
+    try {
+        const permission = await Notification.requestPermission();
+        $('#enable-host-notifications').prop('hidden', permission !== 'default');
+        if (permission === 'granted') {
+            showDesktopHostNotification($('#host-join-notice-text').text(), Date.now());
+        } else {
+            setStatusMessage('Desktop notifications were not enabled; in-table alerts will still appear.');
+        }
+    } catch (error) {
+        console.error('Enabling desktop table-request notifications failed:', error);
+        setStatusMessage('Desktop notifications could not be enabled.');
+    }
+}
+
 async function approveRoomRequest() {
     const uid = $(this).attr('data-approve-request');
     const row = $(this).closest('.room-request-item');
@@ -1099,6 +1237,9 @@ async function approveRoomRequest() {
             return;
         }
         onlineState.pendingRequests.delete(uid);
+        if (!onlineState.pendingRequests.size) {
+            $('#table-admin-btn').removeClass('has-join-requests').removeAttr('aria-label');
+        }
         const player = gameState.players[accepted.seatIndex];
         player.uid = accepted.uid;
         player.name = accepted.name;
@@ -1112,6 +1253,7 @@ async function approveRoomRequest() {
         };
         renderRoomLobby(onlineState.room);
         updateUI();
+        $('#host-join-notice').prop('hidden', true);
         if (onlineState.hasStarted) await publishOnlineState(true);
     } catch (error) {
         console.error('Approving the player request failed:', error);
@@ -1127,6 +1269,10 @@ async function rejectRoomRequest() {
         await window.rungFirebase.rejectRequest(onlineState.roomId, uid);
         onlineState.pendingRequests.delete(uid);
         renderPendingRequests();
+        if (!onlineState.pendingRequests.size) {
+            $('#table-admin-btn').removeClass('has-join-requests').removeAttr('aria-label');
+            $('#host-join-notice').prop('hidden', true);
+        }
     } catch (error) {
         console.error('Declining the player request failed:', error);
         setStatusMessage(error.message || 'The guest request could not be declined.');
@@ -1134,6 +1280,7 @@ async function rejectRoomRequest() {
 }
 
 function showRoomLobby(room) {
+    closeTrumpSelection();
     $('#splash-screen, #lobby-screen, #create-table-modal').prop('hidden', true);
     $('#room-lobby').prop('hidden', false);
     renderRoomLobby(room);
@@ -1168,7 +1315,17 @@ function showGameScreen() {
     $('#splash-screen, #lobby-screen, #room-lobby, #create-table-modal').prop('hidden', true);
     $('#rung-app').removeClass('is-screen-visible');
     $('.game-container').addClass('is-active');
-    $('#voice-toggle-btn').prop('disabled', !onlineState.roomId || onlineState.isViewer);
+    if (gameState.gameState === 'TRUMP_SELECTION' && onlineState.activeTrumpPrompt) {
+        openTrumpSelection();
+    }
+    const voiceSupported = Boolean(
+        navigator.mediaDevices?.getUserMedia && typeof RTCPeerConnection === 'function'
+    );
+    $('#voice-toggle-btn').prop('disabled',
+        !onlineState.roomId || onlineState.isViewer || !voiceSupported)
+        .attr('title', voiceSupported
+            ? 'Join the table voice chat'
+            : 'Microphone and WebRTC are not supported by this browser or connection');
     $('#new-game-btn, #play-again-btn').prop('disabled', onlineState.isReplica);
     $('#table-admin-btn').prop('hidden', !onlineState.isHost);
     if (onlineState.isViewer) $('#current-player').text('Watching as viewer');
@@ -1213,6 +1370,7 @@ function leaveRoomLobby() {
 }
 
 function returnToLobby() {
+    closeTrumpSelection();
     if (!onlineState.isHost && onlineState.roomId) leaveRoomLobby();
     $('#rung-app').addClass('is-screen-visible');
     $('.game-container').removeClass('is-active');
@@ -1280,13 +1438,16 @@ function startOnlineTurnTimer() {
         const uid = player.uid;
         if (uid) {
             onlineState.missedTurns[uid] = (onlineState.missedTurns[uid] || 0) + 1;
-            if (onlineState.missedTurns[uid] >= 3) replacePlayerWithBot(player);
-            else setStatusMessage(`${player.name} timed out (${onlineState.missedTurns[uid]}/3); highest valid card played.`);
+            if (onlineState.missedTurns[uid] >= MAX_MISSED_TURNS) {
+                replacePlayerWithBot(player);
+            } else {
+                setStatusMessage(`${player.name} timed out (${onlineState.missedTurns[uid]}/${MAX_MISSED_TURNS}); highest valid card played.`);
+            }
         } else {
             setStatusMessage(`${player.name} timed out; highest valid card played.`);
         }
         playCard(automaticCard, player);
-    }, 30000);
+    }, ONLINE_TURN_TIMEOUT_MS);
 }
 
 function replacePlayerWithBot(player) {
@@ -1322,6 +1483,7 @@ async function processOnlineAction(actionSnapshot) {
                 return;
             }
             const resolveChoice = onlineState.pendingTrumpChoice;
+            onlineState.missedTurns[action.uid] = 0;
             onlineState.pendingTrumpChoice = null;
             await firebase.markActionProcessed(actionSnapshot.ref);
             resolveChoice(action.trumpSuit);
@@ -1452,9 +1614,8 @@ function applyPublicGameState(state, seats) {
     } else {
         onlineState.activeTrumpPrompt = false;
         onlineState.pendingAction = false;
-        $('#trump-selection').hide().attr('aria-hidden', 'true');
+        closeTrumpSelection();
         $('#trump-selection .trump-btn').prop('disabled', false);
-        $('.game-table').removeClass('is-trump-selection');
         setStatusMessage(onlineState.isViewer
             ? `${gameState.players[state.currentPlayer]?.name || 'Player'} is playing…`
             : (state.currentPlayer === onlineState.seatIndex
@@ -1508,12 +1669,16 @@ function acceptPrivateHand(hand) {
 
 function showRemoteTrumpPrompt() {
     if (!onlineState.isReplica || onlineState.isViewer ||
-        onlineState.seatIndex !== gameState.trumpChooserId - 1) return;
+        onlineState.seatIndex !== gameState.trumpChooserId - 1) {
+        onlineState.activeTrumpPrompt = false;
+        closeTrumpSelection();
+        return;
+    }
     $('#trump-selection-title').text('Choose the trump suit for your team');
-    $('.game-table').addClass('is-trump-selection');
-    $('#trump-selection').css('display', 'flex').attr('aria-hidden', 'false');
-    if (onlineState.activeTrumpPrompt) return;
+    const promptAlreadyActive = onlineState.activeTrumpPrompt;
     onlineState.activeTrumpPrompt = true;
+    openTrumpSelection();
+    if (promptAlreadyActive) return;
     $('#trump-selection .trump-btn').off('click.remoteTrump').on('click.remoteTrump', async function() {
         const suit = $(this).attr('data-suit');
         if (!SUITS.includes(suit) || onlineState.pendingAction) return;
@@ -1615,7 +1780,14 @@ function scheduleVoiceSignal(peerUid, initiate) {
     const connection = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
-    const state = { connection, appliedOffer: false, appliedAnswer: false };
+    const state = {
+        connection,
+        sessionId: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        signalId: null,
+        appliedOffer: false,
+        appliedAnswer: false,
+        unsubscribe: null
+    };
     onlineState.voicePeers.set(peerUid, state);
     onlineState.voiceStream.getTracks().forEach(track => connection.addTrack(track, onlineState.voiceStream));
     connection.ontrack = event => {
@@ -1623,46 +1795,107 @@ function scheduleVoiceSignal(peerUid, initiate) {
         if (!audio) {
             audio = document.createElement('audio');
             audio.id = `voice-audio-${peerUid}`;
+            audio.className = 'voice-audio';
             audio.autoplay = true;
+            audio.playsInline = true;
             document.body.append(audio);
         }
-        audio.srcObject = event.streams[0];
+        audio.srcObject = event.streams[0] || new MediaStream([event.track]);
+        event.track.addEventListener('ended', () => {
+            resetVoicePeer(peerUid, state);
+            if (onlineState.voiceStream &&
+                onlineState.room?.seats?.some(seat => seat.uid === peerUid)) {
+                scheduleVoiceSignal(peerUid, true);
+            }
+        }, { once: true });
+        audio.play().catch(error => {
+            console.warn('Remote voice playback is waiting for a browser gesture:', error);
+            audio.controls = true;
+            setStatusMessage('Voice is connected. Use the on-screen audio controls if playback is blocked.');
+        });
     };
     const firebase = window.rungFirebase;
     const localUid = firebase.user.uid;
     const offerer = localUid < peerUid;
     if (offerer === initiate) {
         const signalUnsubscribe = firebase.listenVoiceSignal(onlineState.roomId, localUid, peerUid, async signal => {
-            if (!signal.answer || state.appliedAnswer) return;
+            if (signal.sessionId !== state.sessionId || !signal.answer || state.appliedAnswer) return;
             state.appliedAnswer = true;
-            await connection.setRemoteDescription(signal.answer);
+            try {
+                await connection.setRemoteDescription(signal.answer);
+            } catch (error) {
+                console.error('Applying the voice answer failed:', error);
+                showFirebaseError('The table voice connection could not be completed.');
+            }
         }, error => console.error('Voice answer subscription failed:', error));
+        state.unsubscribe = signalUnsubscribe;
         onlineState.voiceUnsubscribes.push(signalUnsubscribe);
         connection.createOffer()
             .then(offer => connection.setLocalDescription(offer))
             .then(() => waitForIceGathering(connection))
-            .then(() => firebase.writeVoiceOffer(onlineState.roomId, localUid, peerUid, connection.localDescription.toJSON()))
+            .then(() => firebase.writeVoiceOffer(
+                onlineState.roomId, localUid, peerUid, connection.localDescription.toJSON(), state.sessionId
+            ))
             .catch(error => {
                 console.error('Creating the voice offer failed:', error);
                 showFirebaseError('Voice connection could not be started.');
             });
     } else {
         const signalUnsubscribe = firebase.listenVoiceSignal(onlineState.roomId, peerUid, localUid, async signal => {
-            if (!signal.offer || state.appliedOffer) return;
+            const sessionKey = `rung-voice-session:${onlineState.roomId}:${peerUid}:${localUid}`;
+            const lastSessionId = localStorage.getItem(sessionKey);
+            if (!signal.offer || !signal.sessionId) return;
+            if (state.appliedOffer && signal.sessionId !== state.sessionId) {
+                resetVoicePeer(peerUid, state);
+                scheduleVoiceSignal(peerUid, true);
+                return;
+            }
+            if (signal.sessionId === lastSessionId || state.appliedOffer) return;
             state.appliedOffer = true;
+            state.sessionId = signal.sessionId;
+            state.signalId = signal.signalId;
             try {
                 await connection.setRemoteDescription(signal.offer);
                 const answer = await connection.createAnswer();
                 await connection.setLocalDescription(answer);
                 await waitForIceGathering(connection);
-                await firebase.writeVoiceAnswer(onlineState.roomId, peerUid, localUid, connection.localDescription.toJSON());
+                await firebase.writeVoiceAnswer(
+                    onlineState.roomId, state.signalId, connection.localDescription.toJSON()
+                );
+                localStorage.setItem(sessionKey, state.sessionId);
             } catch (error) {
+                state.appliedOffer = false;
                 console.error('Answering a voice connection failed:', error);
                 showFirebaseError('Voice connection could not be completed.');
             }
         }, error => console.error('Voice offer subscription failed:', error));
+        state.unsubscribe = signalUnsubscribe;
         onlineState.voiceUnsubscribes.push(signalUnsubscribe);
     }
+}
+
+function resetVoicePeer(peerUid, expectedPeer = null) {
+    const peer = onlineState.voicePeers.get(peerUid);
+    if (!peer || (expectedPeer && peer !== expectedPeer)) return;
+    peer.connection.close();
+    peer.unsubscribe?.();
+    onlineState.voiceUnsubscribes = onlineState.voiceUnsubscribes
+        .filter(unsubscribe => unsubscribe !== peer.unsubscribe);
+    onlineState.voicePeers.delete(peerUid);
+    $(`#voice-audio-${peerUid}`).remove();
+}
+
+function syncVoicePeers(room) {
+    if (!onlineState.voiceStream || !window.rungFirebase) return;
+    const currentUids = new Set((room.seats || [])
+        .filter(seat => seat.uid)
+        .map(seat => seat.uid)
+        .filter(uid => uid !== window.rungFirebase.user.uid));
+    onlineState.voicePeers.forEach((peer, uid) => {
+        if (currentUids.has(uid)) return;
+        resetVoicePeer(uid);
+    });
+    currentUids.forEach(uid => scheduleVoiceSignal(uid, true));
 }
 
 function waitForIceGathering(connection) {
@@ -1689,18 +1922,25 @@ async function toggleVoice() {
         onlineState.voiceUnsubscribes.forEach(unsubscribe => unsubscribe());
         onlineState.voiceUnsubscribes = [];
         $('audio[id^="voice-audio-"]').remove();
-        button.text('Join voice').attr('aria-pressed', 'false');
+        button.text('Join voice').attr('aria-pressed', 'false').removeClass('is-voice-connected');
         return;
     }
     try {
-        onlineState.voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        button.text('Leave voice').attr('aria-pressed', 'true');
-        const peers = (onlineState.room?.seats || []).filter(seat => seat.uid).map(seat => seat.uid);
-        peers.forEach(uid => scheduleVoiceSignal(uid, true));
-        setStatusMessage('Voice is on. If a player is not audible, their network may require a TURN relay.');
+        if (!navigator.mediaDevices?.getUserMedia) {
+            throw new Error('This browser does not support microphone access.');
+        }
+        if (typeof RTCPeerConnection !== 'function') {
+            throw new Error('This browser does not support WebRTC voice.');
+        }
+        onlineState.voiceStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+        button.text('Leave voice').attr('aria-pressed', 'true').addClass('is-voice-connected');
+        syncVoicePeers(onlineState.room || { seats: [] });
+        setStatusMessage('Microphone is on. Voice will connect to seated players at this table.');
     } catch (error) {
         console.error('Microphone access failed:', error);
-        showFirebaseError('Microphone permission was denied or no microphone is available.');
+        showFirebaseError(error.message || 'Microphone permission was denied or no microphone is available.');
     }
 }
 
@@ -1708,6 +1948,7 @@ async function toggleVoice() {
 async function initializeGame() {
 	try {
         onlineState.dealCompleted = false;
+        onlineState.activeTrumpPrompt = false;
         $('#bot-banter-log').html('<p class="bot-banter-empty">Bot banter will appear here during the game.</p>');
 		// Reset game state
 		if (!onlineState.roomId) {
@@ -1728,11 +1969,14 @@ async function initializeGame() {
 		});
 		gameState.currentPlayer = 0;
 		gameState.trumpSuit = null;
-		gameState.trumpChooserId = gameState.nextTrumpChooserId || 1;
+        gameState.trumpChooserId = onlineState.roomId
+            ? gameState.nextTrumpChooserId || 1
+            : 1;
 		gameState.ledSuit = null;
 		gameState.trickCards = [];
 		gameState.trickWinner = null;
 		gameState.handsPlayed = 0;
+		closeTrumpSelection();
 		gameState.gameState = "TRUMP_SELECTION";
 		gameState.team1Points = 0;
 		gameState.team2Points = 0;
@@ -1869,7 +2113,7 @@ async function dealCards() {
         selectTrump(chosenSuit, trumpChooser);
     } else {
         setStatusMessage(`${trumpChooser.name} is choosing trump for the winning team...`);
-        $('#trump-selection').hide();
+        closeTrumpSelection();
         await sleep(600);
         selectTrump(chooseTrumpSuit(trumpChooser), trumpChooser);
     }
@@ -1906,6 +2150,7 @@ function waitForTrumpSelection(chooser) {
             const finish = suit => {
                 if (settled) return;
                 settled = true;
+                onlineState.activeTrumpPrompt = false;
                 clearTimeout(onlineState.turnTimer);
                 onlineState.turnTimer = null;
                 onlineState.turnTimerKey = null;
@@ -1916,10 +2161,13 @@ function waitForTrumpSelection(chooser) {
             onlineState.turnTimer = setTimeout(() => {
                 if (settled) return;
                 onlineState.missedTurns[chooser.uid] = (onlineState.missedTurns[chooser.uid] || 0) + 1;
-                if (onlineState.missedTurns[chooser.uid] >= 3) replacePlayerWithBot(chooser);
-                setStatusMessage(`${chooser.name} timed out choosing trump; a suit was selected automatically.`);
+                if (onlineState.missedTurns[chooser.uid] >= MAX_MISSED_TURNS) {
+                    replacePlayerWithBot(chooser);
+                } else {
+                    setStatusMessage(`${chooser.name} timed out choosing trump (${onlineState.missedTurns[chooser.uid]}/${MAX_MISSED_TURNS}); a suit was selected automatically.`);
+                }
                 finish(chooseTrumpSuit(chooser));
-            }, 30000);
+            }, ONLINE_TURN_TIMEOUT_MS);
         });
     }
 	return new Promise((resolve) => {
@@ -1927,6 +2175,7 @@ function waitForTrumpSelection(chooser) {
         const finish = suit => {
             if (settled) return;
             settled = true;
+            onlineState.activeTrumpPrompt = false;
             clearTimeout(onlineState.turnTimer);
             onlineState.turnTimer = null;
             onlineState.turnTimerKey = null;
@@ -1936,19 +2185,24 @@ function waitForTrumpSelection(chooser) {
 			? `${chooser.name}, choose trump for the winning team`
 			: `${chooser.name}, choose the trump suit`);
 		$('.game-table').addClass('is-trump-selection');
-		$('#trump-selection').css('display', 'flex').attr('aria-hidden', 'false');
+        onlineState.activeTrumpPrompt = true;
+        openTrumpSelection();
 		$('#trump-selection .trump-btn').off('click.trumpSelect').on('click.trumpSelect', function() {
 			const suit = $(this).attr('data-suit');
+            if (chooser?.uid) onlineState.missedTurns[chooser.uid] = 0;
 			finish(suit);
 		});
         if (onlineState.isHost && chooser.uid) {
             onlineState.turnTimer = setTimeout(() => {
                 if (settled) return;
                 onlineState.missedTurns[chooser.uid] = (onlineState.missedTurns[chooser.uid] || 0) + 1;
-                if (onlineState.missedTurns[chooser.uid] >= 3) replacePlayerWithBot(chooser);
-                setStatusMessage(`${chooser.name} timed out choosing trump; a suit was selected automatically.`);
+                if (onlineState.missedTurns[chooser.uid] >= MAX_MISSED_TURNS) {
+                    replacePlayerWithBot(chooser);
+                } else {
+                    setStatusMessage(`${chooser.name} timed out choosing trump (${onlineState.missedTurns[chooser.uid]}/${MAX_MISSED_TURNS}); a suit was selected automatically.`);
+                }
                 finish(chooseTrumpSuit(chooser));
-            }, 30000);
+            }, ONLINE_TURN_TIMEOUT_MS);
         }
 	});
 }
@@ -1960,11 +2214,12 @@ function selectTrump(suit, chooser) {
 	}
 	// set game-wide trump and hide overlay
 	gameState.trumpSuit = suit;
-    if (chooser?.uid) onlineState.missedTurns[chooser.uid] = 0;
 	// keep gameState as PLAYING once trump is set
 	gameState.gameState = "PLAYING";
+    onlineState.activeTrumpPrompt = false;
+    onlineState.pendingAction = false;
 	$('.game-table').removeClass('is-trump-selection');
-	$('#trump-selection').hide();
+	closeTrumpSelection();
     onlineState.activeTrumpPrompt = false;
     onlineState.pendingAction = false;
     $('#trump-selection .trump-btn').prop('disabled', false);
@@ -2852,9 +3107,10 @@ function endGame() {
     $('#rules-content').hide().empty();
     $('#win-message').text(winnerMessage);
     const nextChooser = gameState.players.find(player => player.id === gameState.nextTrumpChooserId);
-    $('#steak-display').text(gameState.lastWinningTeam
+    const steakText = gameState.lastWinningTeam
         ? `${steakMessage} · ${nextChooser.name} chooses trump next game`
-        : steakMessage);
+        : steakMessage;
+    $('#steak-display').text(steakText).data('base-text', steakText);
     $('#win-message, #steak-display').show();
     $('#celebration').css('display', 'flex');
     
@@ -2874,7 +3130,15 @@ async function recordOnlineGame(isSweep, celebrationTitle) {
     const localSeat = gameState.players.find(player => player.uid === user.uid);
     if (!localSeat) return true;
     const recordKey = `rung-recorded-${onlineState.gameId}`;
-    if (localStorage.getItem(recordKey) === 'complete') return true;
+    if (localStorage.getItem(recordKey) === 'complete') {
+        try {
+            const stats = await window.rungFirebase.getMyLeaderboardEntry();
+            updateSteakWinRate(stats);
+        } catch (error) {
+            console.error('Loading your Hall of Fame record failed:', error);
+        }
+        return true;
+    }
     if (onlineState.recordingGameId === onlineState.gameId) {
         return onlineState.recordingPromise;
     }
@@ -2888,13 +3152,14 @@ async function recordOnlineGame(isSweep, celebrationTitle) {
     if (won && celebrationTitle === 'GOOHN COURT!!') awards.push('goohn');
     onlineState.recordingPromise = (async () => {
         try {
-            await window.rungFirebase.updateLeaderboard(
+            const stats = await window.rungFirebase.updateLeaderboard(
                 localSeat.name,
                 partner?.name || '',
                 won && isSweep ? 1 : 0,
                 awards,
                 gameState.lastWinningTeam === null ? null : won
             );
+            updateSteakWinRate(stats);
             localStorage.setItem(recordKey, 'complete');
             await refreshHallOfFame();
             return true;
@@ -2908,6 +3173,17 @@ async function recordOnlineGame(isSweep, celebrationTitle) {
         }
     })();
     return onlineState.recordingPromise;
+}
+
+function updateSteakWinRate(stats) {
+    const wins = Number(stats?.wins || 0);
+    const losses = Number(stats?.losses || 0);
+    const trackedDecisions = wins + losses;
+    const winRate = trackedDecisions ? `${Math.round((wins / trackedDecisions) * 100)}%` : '—';
+    const baseText = $('#steak-display').data('base-text');
+    if (baseText) {
+        $('#steak-display').text(`${baseText} · Record ${wins}-${losses} · Win rate ${winRate}`);
+    }
 }
 
 async function endMatchToLobby() {
@@ -2973,8 +3249,13 @@ function showRules() {
             <ul>
                 <li>Use <strong>Your running tables → Resume</strong> to return to a game you already joined. Your stable Player ID is informational; the table ID or private invite code identifies the table.</li>
                 <li>New players request a seat; the host has up to <strong>60 seconds</strong> to approve or decline. If there is no response, the request expires and you can retry or watch a public table.</li>
-                <li>The host approves a guest by choosing which bot seat to replace. A public-table viewer can watch without taking a seat.</li>
+                <li>Player requests appear in a live host alert and in <strong>Manage table</strong>. The first approved player replaces Player 3 and partners the host; later players take the next available bot seat. Public viewer requests are accepted automatically and do not take a seat.</li>
+                <li>Each turn has a <strong>15-second</strong> timer. The highest legal card is played automatically after a timeout; the first two missed turns do not replace the player. After <strong>3 consecutive missed turns</strong>, that player is replaced by a bot and returned to the lobby.</li>
                 <li>The host’s browser runs the game and turn timers. If the host refreshes or returns on the same browser identity, the saved private game state restores host control. If recovery data is unavailable, the host can still watch the last synchronized state.</li>
+            </ul>
+            <h6>Table voice</h6>
+            <ul>
+                <li>Players can choose <strong>Join voice</strong> to share microphone audio with the other seated players. Allow microphone access when the browser asks; the connection uses WebRTC and may need a TURN relay on restrictive networks.</li>
             </ul>
         </div>
     `;

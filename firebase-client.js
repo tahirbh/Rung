@@ -280,7 +280,14 @@ async function updateLeaderboard(name, partnerName, courts, awards, won) {
             awards: nextAwards,
             updatedAt: serverTimestamp()
         });
+        return { wins, losses };
     });
+}
+
+async function getMyLeaderboardEntry() {
+    const user = await currentUser;
+    const snapshot = await getDoc(doc(db, 'leaderboard', user.uid));
+    return snapshot.exists() ? snapshot.data() : null;
 }
 
 async function getLeaderboard() {
@@ -328,21 +335,31 @@ async function deleteMemberRequest(roomId, uid) {
     await deleteDoc(doc(db, 'rooms', roomId, 'memberRequests', uid));
 }
 
-function voiceSignalRef(roomId, fromUid, toUid) {
-    return doc(db, 'rooms', roomId, 'voice', `${fromUid}_${toUid}`);
+async function writeVoiceOffer(roomId, fromUid, toUid, offer, sessionId) {
+    await addDoc(collection(db, 'rooms', roomId, 'voice'), {
+        fromUid, toUid, offer, sessionId, createdAt: serverTimestamp()
+    });
 }
 
-async function writeVoiceOffer(roomId, fromUid, toUid, offer) {
-    await setDoc(voiceSignalRef(roomId, fromUid, toUid), { fromUid, toUid, offer, updatedAt: serverTimestamp() });
-}
-
-async function writeVoiceAnswer(roomId, fromUid, toUid, answer) {
-    await updateDoc(voiceSignalRef(roomId, fromUid, toUid), { answer, updatedAt: serverTimestamp() });
+async function writeVoiceAnswer(roomId, signalId, answer) {
+    await updateDoc(doc(db, 'rooms', roomId, 'voice', signalId), {
+        answer, updatedAt: serverTimestamp()
+    });
 }
 
 function listenVoiceSignal(roomId, fromUid, toUid, callback, onError) {
-    return onSnapshot(voiceSignalRef(roomId, fromUid, toUid), snapshot => {
-        if (snapshot.exists()) callback(snapshot.data());
+    return onSnapshot(query(
+        collection(db, 'rooms', roomId, 'voice'),
+        where('toUid', '==', toUid)
+    ), snapshot => {
+        const latest = snapshot.docs
+            .filter(item => item.data().fromUid === fromUid && item.data().sessionId)
+            .sort((first, second) => {
+                const firstSession = String(first.data().sessionId);
+                const secondSession = String(second.data().sessionId);
+                return secondSession.localeCompare(firstSession) || second.id.localeCompare(first.id);
+            })[0];
+        if (latest) callback({ ...latest.data(), signalId: latest.id });
     }, onError);
 }
 
@@ -390,6 +407,7 @@ window.rungFirebaseReady = currentUser.then(user => {
         getHostState,
         markActionProcessed,
         updateLeaderboard,
+        getMyLeaderboardEntry,
         getLeaderboard,
         listenRoom,
         listenRequests,
