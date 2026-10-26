@@ -881,6 +881,12 @@ async function joinTableFromCode(event) {
     try {
         const firebase = await firebaseApi();
         const room = await firebase.resolveRoomCode(code);
+        const isPrivateRoom = room.visibility === 'private' || !Array.isArray(room.seats);
+        const alreadyMember = (room.memberUids || []).includes(firebase.user.uid);
+        if (asViewer && isPrivateRoom && !alreadyMember) {
+            showFirebaseError('This is a private table — choose "Partner Seat 3" or "Any Open Seat" to join.');
+            return;
+        }
         await joinCloudRoom(room, code, currentPlayerName(), asViewer, preferredSeatIndex);
         $('#invite-code-input').val('');
     } catch (error) {
@@ -1369,6 +1375,18 @@ function configureHostRoom(room) {
             const firstKicked = [...onlineState.kickedBotSeats].find(idx => onlineState.room?.seats?.[idx]?.isBot);
             if (Number.isInteger(firstKicked)) autoSeat = firstKicked;
         }
+        // Private tables: the invite code itself is the host's invitation, so seat the friend automatically.
+        if (!Number.isInteger(autoSeat) && onlineState.room?.visibility === 'private' && request.inviteCode) {
+            const seats = onlineState.room.seats || [];
+            if (requestedPref !== null && seats[requestedPref]?.isBot) {
+                autoSeat = requestedPref;
+            } else if (seats[2]?.isBot) {
+                autoSeat = 2;
+            } else {
+                const firstBot = seats.findIndex(seat => seat?.isBot);
+                if (firstBot > 0) autoSeat = firstBot;
+            }
+        }
         if (Number.isInteger(autoSeat)) {
             onlineState.kickedBotSeats.delete(autoSeat);
             acceptGuestIntoSeat(request.uid, autoSeat).catch(err =>
@@ -1469,7 +1487,9 @@ function renderRoomLobby(room) {
     $('#copy-invite-code-btn').prop('hidden', !tableCode)
         .text(room.visibility === 'private' ? 'Copy table / invite ID' : 'Copy table ID');
     $('#host-friend-invite-box').prop('hidden', !isHost);
-    $('#start-table-btn').prop('hidden', !isHost || room.status !== 'WAITING');
+    const humanGuests = (room.seats || []).filter((seat, index) => index > 0 && seat && !seat.isBot).length;
+    $('#start-table-btn').prop('hidden', !isHost || room.status !== 'WAITING')
+        .text(humanGuests ? `Start game (${humanGuests + 1} players + ${3 - humanGuests} bot${3 - humanGuests === 1 ? '' : 's'})` : 'Start game with bots');
     $('#join-as-viewer-btn').prop('hidden', isHost || room.visibility !== 'public' || onlineState.isViewer);
     const list = $('#room-seat-list').empty();
     const roleLabels = ['Host (Team 1)', 'Opponent (Team 2)', 'Host Partner (Team 1)', 'Opponent (Team 2)'];
@@ -1651,7 +1671,9 @@ async function acceptGuestIntoSeat(uid, seatIndex) {
     const joinMsg = `${accepted.name} replaced bot ${oldBotName} ${roleLabel} and took over their cards!`;
     setStatusMessage(joinMsg);
     showTableAnnouncement(joinMsg, 3500);
-    if (onlineState.roomId) {
+    // Only publish game state once the game has actually started. Publishing in the WAITING lobby
+    // flipped the room to PLAYING with a stale/empty game and pushed the partner into a broken table.
+    if (onlineState.roomId && onlineState.hasStarted) {
         await publishOnlineState(true);
         if (gameState.gameState === 'PLAYING' && gameState.currentPlayer === accepted.seatIndex) {
             startOnlineTurnTimer();
@@ -1839,6 +1861,13 @@ function prepareNewGame() {
 function leaveRoomLobby() {
     if (onlineState.isHost) {
         $('#room-lobby').prop('hidden', true);
+        // Host closed the lobby before starting: show the main lobby instead of a blank screen.
+        // The table stays open and can be reopened from "Your Active Tables → Resume".
+        if (!$('.game-container').hasClass('is-active')) {
+            $('#rung-app').addClass('is-screen-visible');
+            $('#lobby-screen').prop('hidden', false);
+            refreshMyRunningTables();
+        }
         return;
     }
     const roomId = onlineState.roomId;
