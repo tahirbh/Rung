@@ -2,8 +2,14 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>RUNG - Court Piece Card Game</title>
+    <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>♠</text></svg>">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="style.css">
@@ -11,80 +17,183 @@
 </head>
 <body>
     <main id="rung-app" class="rung-app is-screen-visible">
-        <section id="splash-screen" class="app-screen splash-screen" aria-labelledby="splash-title">
+        <section id="splash-screen" class="app-screen splash-screen" aria-labelledby="splash-title" hidden>
             <div class="splash-brand">RUNG</div>
-            <p class="splash-kicker">COURT PIECE · TEAM UP · PLAY YOUR HAND</p>
-            <h1 id="splash-title">The table is waiting.</h1>
-            <p class="splash-copy">A classic partnership game, ready for the next hand.</p>
-            <button id="enter-lobby-btn" class="lobby-primary" type="button">Enter the Hall of Fame</button>
+            <p class="splash-kicker">COURT PIECE · VIP CLUB EDITION · 52 CARDS</p>
+            <h1 id="splash-title">The VIP Club Table Is Waiting.</h1>
+            <p class="splash-copy">World-class partnership Court Piece — real human seats, bot kick &amp; partner replacement.</p>
+            <button id="enter-lobby-btn" class="lobby-primary" type="button">Enter the Club</button>
             <div id="firebase-status" class="firebase-status" role="status">Connecting to Rung tables…</div>
         </section>
 
-        <section id="lobby-screen" class="app-screen lobby-screen" aria-labelledby="lobby-title" hidden>
+        <section id="lobby-screen" class="app-screen lobby-screen" aria-labelledby="lobby-title">
             <header class="lobby-header">
-                <div>
+                <div class="lobby-brand-block">
                     <div class="splash-brand">RUNG</div>
-                    <p class="splash-kicker">THE TABLE IS YOURS</p>
+                    <p class="splash-kicker">VIP COURT PIECE CLUB</p>
                 </div>
-                <label class="player-profile">Playing as
-                    <input id="player-name-input" maxlength="20" autocomplete="nickname" placeholder="Your name">
-                    <small id="player-id-label">Player ID: connecting…</small>
-                </label>
+
+                <nav class="lobby-tabs" role="tablist" aria-label="Main navigation">
+                    <button id="tab-btn-home" class="lobby-tab-btn is-active" type="button" role="tab" aria-selected="true" aria-controls="lobby-tab-home" data-lobby-tab="home">
+                        <i class="fas fa-home" aria-hidden="true"></i> Home
+                    </button>
+                    <button id="tab-btn-hall" class="lobby-tab-btn" type="button" role="tab" aria-selected="false" aria-controls="lobby-tab-hall" data-lobby-tab="hall">
+                        <i class="fas fa-crown" aria-hidden="true"></i> Hall of Fame
+                    </button>
+                    <button id="tab-btn-rules" class="lobby-tab-btn" type="button" role="tab" aria-selected="false" aria-controls="lobby-tab-rules" data-lobby-tab="rules">
+                        <i class="fas fa-book-open" aria-hidden="true"></i> How to Play
+                    </button>
+                </nav>
+
+                <div class="player-profile">
+                    <label for="player-name-input">Player
+                        <input id="player-name-input" maxlength="20" autocomplete="nickname" placeholder="Your name">
+                    </label>
+                    <div class="player-id-row">
+                        <small id="player-id-label">Player ID: connecting…</small>
+                        <button id="copy-player-id-btn" class="copy-id-mini-btn" type="button" title="Copy your Player ID">Copy ID</button>
+                    </div>
+                </div>
             </header>
 
-            <section class="hall-of-fame" aria-labelledby="lobby-title">
-                <div class="lobby-section-heading">
-                    <div>
-                        <p class="splash-kicker">LEGENDS OF THE TABLE</p>
-                        <h1 id="lobby-title">Hall of Fame</h1>
-                        <p class="ranking-hint">Win/loss stats start with new games; older results are not backfilled.</p>
+            <!-- TAB 1: HOME -->
+            <div id="lobby-tab-home" class="lobby-tab-panel is-active" role="tabpanel" aria-labelledby="tab-btn-home">
+                <section class="club-hero-banner" aria-label="VIP Card Club Lounge">
+                    <div class="club-hero-media">
+                        <img src="images/vip_table_pov.jpg" alt="VIP Rung table with partner and opponents facing you" class="club-hero-img">
+                        <div class="club-hero-lights" aria-hidden="true"></div>
                     </div>
-                    <button id="refresh-rankings-btn" class="lobby-secondary" type="button">Refresh rankings</button>
-                </div>
-                <div class="ranking-table-wrap">
-                    <table class="ranking-table">
-                        <thead><tr><th scope="col">Rank & player</th><th scope="col">Last partner</th><th scope="col">Max Courts</th><th scope="col">Wins</th><th scope="col">Losses</th><th scope="col">W/L Ratio</th><th scope="col">Awards</th><th scope="col">Games</th></tr></thead>
-                        <tbody id="hall-of-fame-body"><tr><td colspan="8">Loading rankings…</td></tr></tbody>
-                    </table>
-                </div>
-            </section>
+                    <div class="club-hero-overlay">
+                        <span class="club-vip-pill">✨ VIP CLUB · 52 CARDS</span>
+                        <h2>Take Your Seat at the VIP Table</h2>
+                        <p>Play solo, join live tables, or kick any bot to invite your partner by <strong>Table ID</strong>.</p>
+                    </div>
+                </section>
 
-            <section class="lobby-actions" aria-label="Choose how to play">
-                <button id="play-random-btn" class="lobby-action-card" type="button">
-                    <span class="lobby-action-icon" aria-hidden="true">♠</span>
-                    <strong>Play Random</strong>
-                    <span>Find an open table or start a public game.</span>
-                </button>
-                <button id="create-table-btn" class="lobby-action-card" type="button">
-                    <span class="lobby-action-icon" aria-hidden="true">♣</span>
-                    <strong>Create Table</strong>
-                    <span>Set up a private invite table or go public.</span>
-                </button>
-            </section>
+                <section id="startup-scoring-section" class="startup-scoring-section" aria-label="Game rule">
+                    <div class="scoring-mode-grid" role="radiogroup" aria-label="Startup scoring rules">
+                        <label class="scoring-mode-option">
+                            <input type="radio" name="startup-scoring-mode" value="single_hand">
+                            <span>
+                                <strong>Single Hand = 1 Pt</strong>
+                                <small>Every hand won scores 1 pt.</small>
+                            </span>
+                        </label>
+                        <label class="scoring-mode-option">
+                            <input type="radio" name="startup-scoring-mode" value="classic_3_2" checked>
+                            <span>
+                                <strong>1st 3 Hands = 3 Pts, then 2+</strong>
+                                <small>Round 1: 3 hands; Round 2+: 2 consecutive wins.</small>
+                            </span>
+                        </label>
+                        <label class="scoring-mode-option">
+                            <input type="radio" name="startup-scoring-mode" value="two_plus">
+                            <span>
+                                <strong>2+ Consecutive Hands</strong>
+                                <small>2 consecutive wins sweeps stacked points.</small>
+                            </span>
+                        </label>
+                    </div>
+                </section>
 
-            <section class="my-running-tables" aria-labelledby="my-running-tables-title">
-                <div class="lobby-section-heading">
-                    <div><p class="splash-kicker">PICK UP WHERE YOU LEFT OFF</p><h2 id="my-running-tables-title">Your running tables</h2></div>
-                    <button id="refresh-my-tables-btn" class="lobby-secondary" type="button">Refresh</button>
-                </div>
-                <div id="my-running-tables-list" class="public-tables-list"><p>Loading your tables…</p></div>
-            </section>
+                <section class="lobby-actions" aria-label="Choose how to play">
+                    <button id="play-solo-btn" class="lobby-action-card" type="button">
+                        <span class="lobby-action-icon" aria-hidden="true">♦</span>
+                        <strong>Solo Game (You + 3 Bots)</strong>
+                        <span>Instant start · kick any bot anytime for a friend.</span>
+                    </button>
+                    <button id="play-random-btn" class="lobby-action-card" type="button">
+                        <span class="lobby-action-icon" aria-hidden="true">♠</span>
+                        <strong>Quick Play Live</strong>
+                        <span>Join an open global table or host a public game.</span>
+                    </button>
+                    <button id="create-table-btn" class="lobby-action-card" type="button">
+                        <span class="lobby-action-icon" aria-hidden="true">♣</span>
+                        <strong>Create Table</strong>
+                        <span>Open a public or private room and invite your partner.</span>
+                    </button>
+                </section>
 
-            <section class="join-table-row" aria-label="Join a table">
-                <form id="join-table-form">
-                    <label for="invite-code-input">Join with a table ID or private invite code</label>
-                    <input id="invite-code-input" maxlength="6" autocomplete="off" placeholder="6-character code">
-                    <button class="lobby-secondary" type="submit">Join table</button>
-                </form>
-            </section>
+                <section class="join-table-row" aria-label="Join a table with Table ID and Player ID">
+                    <form id="join-table-form">
+                        <label for="invite-code-input">
+                            <strong>Join by Table ID</strong>
+                        </label>
+                        <input id="invite-code-input" maxlength="6" autocomplete="off" placeholder="Table ID (6 chars)">
+                        <input id="join-player-id-input" maxlength="20" autocomplete="off" placeholder="Your Player ID" aria-label="Your Player ID">
+                        <select id="join-code-role" class="room-request-seat" aria-label="How to join running table">
+                            <option value="partner">Partner Seat 3</option>
+                            <option value="any">Any Open Seat</option>
+                            <option value="viewer">Watch Live</option>
+                        </select>
+                        <button class="lobby-primary" type="submit">Join Table</button>
+                    </form>
+                </section>
 
-            <section class="public-tables" aria-labelledby="public-tables-title">
-                <div class="lobby-section-heading">
-                    <div><p class="splash-kicker">OPEN SEATS</p><h2 id="public-tables-title">Public tables</h2></div>
-                    <button id="refresh-tables-btn" class="lobby-secondary" type="button">Refresh tables</button>
-                </div>
-                <div id="public-tables-list" class="public-tables-list"><p>Loading public tables…</p></div>
-            </section>
+                <section class="my-running-tables" aria-labelledby="my-running-tables-title" hidden>
+                    <div class="lobby-section-heading">
+                        <h2 id="my-running-tables-title">Your Active Tables</h2>
+                        <button id="refresh-my-tables-btn" class="lobby-secondary" type="button">Refresh</button>
+                    </div>
+                    <div id="my-running-tables-list" class="public-tables-list"></div>
+                </section>
+
+                <section class="public-tables" aria-labelledby="public-tables-title">
+                    <div class="lobby-section-heading">
+                        <h2 id="public-tables-title">Live Public Tables</h2>
+                        <button id="refresh-tables-btn" class="lobby-secondary" type="button">Refresh</button>
+                    </div>
+                    <div id="public-tables-list" class="public-tables-list"><p>Loading live tables…</p></div>
+                </section>
+            </div>
+
+            <!-- TAB 2: HALL OF FAME -->
+            <div id="lobby-tab-hall" class="lobby-tab-panel" role="tabpanel" aria-labelledby="tab-btn-hall" hidden>
+                <section class="hall-of-fame" aria-labelledby="lobby-title">
+                    <div class="lobby-section-heading">
+                        <div>
+                            <p class="splash-kicker">LEGENDS OF THE VIP CLUB</p>
+                            <h1 id="lobby-title">Hall of Fame</h1>
+                            <p class="ranking-hint">Live global leaderboard tracking Courts, Goohn Courts, wins, losses, and your most recent partner.</p>
+                        </div>
+                        <button id="refresh-rankings-btn" class="lobby-secondary" type="button">Refresh rankings</button>
+                    </div>
+                    <div class="ranking-table-wrap">
+                        <table class="ranking-table">
+                            <thead><tr><th scope="col">Rank &amp; player</th><th scope="col">Last partner</th><th scope="col">Max Courts</th><th scope="col">Wins</th><th scope="col">Losses</th><th scope="col">W/L Ratio</th><th scope="col">Awards</th><th scope="col">Games</th></tr></thead>
+                            <tbody id="hall-of-fame-body"><tr><td colspan="8">Loading rankings…</td></tr></tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+
+            <!-- TAB 3: HOW TO PLAY -->
+            <div id="lobby-tab-rules" class="lobby-tab-panel" role="tabpanel" aria-labelledby="tab-btn-rules" hidden>
+                <section class="how-to-play-tab-section" aria-labelledby="how-to-play-tab-title">
+                    <div class="lobby-section-heading">
+                        <div>
+                            <p class="splash-kicker">OFFICIAL VIP CLUB RULES &amp; MULTI-DEVICE GUIDE</p>
+                            <h2 id="how-to-play-tab-title">How to Play RUNG (Court Piece)</h2>
+                        </div>
+                    </div>
+                    <div class="how-to-play-grid">
+                        <article class="how-to-card">
+                            <h3><i class="fas fa-spade" aria-hidden="true"></i> 1. 52-Card Deal &amp; Trump Selection</h3>
+                            <p>Played by 4 players in two partnerships (<strong>Seat 1 &amp; Seat 3</strong> vs. <strong>Seat 2 &amp; Seat 4</strong>). Each player first receives <strong>5 cards</strong> so the Trump Chooser can inspect their hand and call the <strong>Trump Suit (Rung)</strong>, then the remaining cards are dealt to complete 13 cards each.</p>
+                            <p>The winning team of a game chooses trump in the next game. If a team wins a <strong>13-point Court</strong>, trump selection shifts to the lead winner's <strong>partner</strong>!</p>
+                        </article>
+                        <article class="how-to-card">
+                            <h3><i class="fas fa-fire" aria-hidden="true"></i> 2. Senior Lead-Holder &amp; Table Stacking</h3>
+                            <p>Played cards stay stacked on the table until a player who holds the lead wins a consecutive hand on their own lead! If your partner leads <code>Q♦</code>, an opponent plays <code>K♦</code>, and you overtake with <code>A♦</code>, <strong>you become Senior even over your own partner</strong> — cards stay on the table and you must lead and win the next hand yourself to sweep all stacked points!</p>
+                            <p>Whenever an opponent cuts with trump or overtakes the lead, cards and points <strong>keep stacking on the table</strong>, building massive hype until a consecutive win sweeps the entire pile!</p>
+                        </article>
+                        <article class="how-to-card">
+                            <h3><i class="fas fa-user-friends" aria-hidden="true"></i> 3. Kick Bot &amp; Invite Partner (Table ID + Player ID)</h3>
+                            <p>The Table Owner can click <strong>Kick Bot (Partner)</strong> on Seat 3 (or any bot seat) at any time during a live game. Share the 6-character <strong>Table ID</strong> with your friend; they enter the Table ID + their <strong>Player ID</strong> on the Home tab, and upon approval they immediately take over that bot's seat and cards!</p>
+                        </article>
+                    </div>
+                </section>
+            </div>
         </section>
 
         <section id="create-table-modal" class="room-lobby" role="dialog" aria-modal="true" aria-labelledby="create-table-title" hidden>
@@ -93,12 +202,25 @@
                 <p class="splash-kicker">SET THE TABLE</p>
                 <h2 id="create-table-title">Create a table</h2>
                 <label class="table-visibility-choice">
-                    <input type="radio" name="table-visibility" value="private" checked>
-                    <span><strong>Private</strong><small>Invite friends with a shareable code.</small></span>
+                    <input type="radio" name="table-visibility" value="public" checked>
+                    <span><strong>Public (Global Running Table)</strong><small>Global users can watch live or request to replace any bot seat.</small></span>
                 </label>
                 <label class="table-visibility-choice">
-                    <input type="radio" name="table-visibility" value="public">
-                    <span><strong>Public</strong><small>Anyone can join or watch as a viewer.</small></span>
+                    <input type="radio" name="table-visibility" value="private">
+                    <span><strong>Private</strong><small>Invite friends with a shareable code to replace your partner bot.</small></span>
+                </label>
+                <p class="splash-kicker" style="margin-top:16px;">SCORING RULE</p>
+                <label class="table-visibility-choice">
+                    <input type="radio" name="modal-scoring-mode" value="single_hand">
+                    <span><strong>Single Hand Winner = 1 Point</strong><small>Every single hand won scores 1 point immediately.</small></span>
+                </label>
+                <label class="table-visibility-choice">
+                    <input type="radio" name="modal-scoring-mode" value="classic_3_2" checked>
+                    <span><strong>1st 3 Hands = 3 Pts, then 2+ Hands Wins Points</strong><small>1st 3 hands winner wins 3 pts; then 2 or 2+ hands wins stacked points.</small></span>
+                </label>
+                <label class="table-visibility-choice">
+                    <input type="radio" name="modal-scoring-mode" value="two_plus">
+                    <span><strong>2 or 2+ Hands Winner Wins Points</strong><small>2+ consecutive hands wins all stacked points from the start.</small></span>
                 </label>
                 <button class="lobby-primary" type="submit">Create table</button>
                 <div id="create-table-error" class="lobby-error" role="alert"></div>
@@ -113,6 +235,18 @@
                 <p id="room-lobby-description"></p>
                 <div id="room-invite-code" class="room-invite-code" hidden></div>
                 <button id="copy-invite-code-btn" class="lobby-secondary" type="button" hidden>Copy invite code</button>
+                <div id="host-friend-invite-box" class="host-friend-invite-box" hidden>
+                    <label for="host-friend-player-id">Pre-Approve Friend by Player ID (Auto-Replace Bot)</label>
+                    <div class="host-friend-invite-row">
+                        <input id="host-friend-player-id" maxlength="20" autocomplete="off" placeholder="Friend's Player ID (e.g. RUNG-12AB34)">
+                        <select id="host-friend-seat-select" class="room-request-seat" aria-label="Seat for invited friend">
+                            <option value="2">Partner Seat 3 (Team 1)</option>
+                            <option value="1">Opponent Seat 2 (Team 2)</option>
+                            <option value="3">Opponent Seat 4 (Team 2)</option>
+                        </select>
+                        <button id="host-preapprove-friend-btn" class="lobby-primary" type="button">Kick Bot &amp; Reserve</button>
+                    </div>
+                </div>
                 <div id="room-seat-list" class="room-seat-list"></div>
                 <section id="room-requests-section" class="room-requests-section" hidden aria-labelledby="room-requests-title">
                     <h3 id="room-requests-title">Player requests</h3>
@@ -142,20 +276,24 @@
     <div class="game-container">
         <!-- TOP BAR: compact header for mobile & desktop -->
         <div class="top-bar game-header">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-                <h1 class="game-title" style="margin:0;font-size:18px;">RUNG - Court Piece</h1>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <h1 class="game-title" style="margin:0;font-size:18px;">RUNG - Court Piece</h1>
+                    <span id="live-table-badge" class="live-table-badge" hidden></span>
+                    <button id="top-kick-bot-btn" class="lobby-secondary top-kick-bot-btn" type="button" hidden>Kick Bot / Invite Partner</button>
+                </div>
                 <div class="status-message" id="status-message" style="font-weight:600;color:#ffd54f;">Game starting... Select trump suit</div>
             </div>
 
             <div class="score-display" style="display:flex;gap:12px;">
                 <!-- ...existing score boxes markup... -->
                 <div class="score-box">
-                    <h5>Team 1 (You & Player 3)</h5>
+                    <h5 id="team1-label">Team 1 (You & Player 3)</h5>
                     <div class="score">Points: <span id="team1-points">0</span>/13</div>
                     <div class="score">Consecutive Wins: <span id="team1-consecutive">0</span></div>
                 </div>
                 <div class="score-box">
-                    <h5>Team 2 (Player 2 & 4)</h5>
+                    <h5 id="team2-label">Team 2 (Player 2 & 4)</h5>
                     <div class="score">Points: <span id="team2-points">0</span>/13</div>
                     <div class="score">Consecutive Wins: <span id="team2-consecutive">0</span></div>
                 </div>
@@ -176,7 +314,8 @@
         </div>
 
         <div class="game-table">
-            <div id="table-announcement" class="table-announcement" aria-live="polite"></div>
+            <div class="club-falling-lights" aria-hidden="true"></div>
+            <div id="table-announcement" class="table-announcement" aria-live="polite" hidden></div>
             <!-- Top Player -->
             <div class="player-area player-top">
                 <div class="player-name">Player 3 (Team 1)</div>
@@ -229,13 +368,13 @@
             <div id="current-player">Current: You</div>
             <div id="cards-remaining">Cards in hand: 13</div>
             <div id="hands-played">Hands played: 0</div>
-            <div style="display:flex;gap:6px;">
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
                 <button id="lobby-btn" class="btn btn-game" type="button">Lobby</button>
-                <button id="table-admin-btn" class="btn btn-game" type="button" hidden>Manage table</button>
+                <button id="table-admin-btn" class="btn btn-game" type="button" hidden>Manage Table / Kick Bot</button>
+                <button id="viewer-take-seat-btn" class="btn btn-game" type="button" hidden>Take Bot Seat (Play)</button>
                 <button id="voice-toggle-btn" class="btn btn-game" type="button" aria-pressed="false" disabled>Join voice</button>
                 <button id="chat-toggle-btn" class="btn btn-game" type="button" aria-expanded="false" aria-controls="chat-picker">Reactions</button>
                 <button id="new-game-btn" class="btn btn-game" type="button">New Game</button>
-                <button id="rules-btn" class="btn btn-game" type="button">How to Play</button>
             </div>
         </div>
     </div>
@@ -289,6 +428,8 @@
     <div id="trump-selection" class="trump-selection" aria-hidden="true">
         <div class="trump-modal" role="dialog" aria-modal="true" aria-labelledby="trump-selection-title">
              <h4 id="trump-selection-title">Choose the trump suit</h4>
+             <p class="trump-hand-subtitle">Your first 5 dealt cards:</p>
+             <div id="trump-hand-preview" class="trump-hand-preview" aria-label="Your first 5 dealt cards"></div>
              <div class="trump-options">
                  <button class="trump-btn" type="button" data-suit="hearts" aria-label="Hearts">♥</button>
                  <button class="trump-btn" type="button" data-suit="diamonds" aria-label="Diamonds">♦</button>
@@ -300,16 +441,23 @@
     
     <!-- Celebration Modal -->
     <div id="celebration" class="celebration" style="display: none;">
-        <div id="celebration-title" class="celebration-title" aria-hidden="true">ROUND CLEAR!</div>
-        <div id="trophy" class="trophy" aria-hidden="true">
-            <i class="fas fa-trophy"></i>
+        <div class="celebration-flash-overlay" aria-hidden="true"></div>
+        <div id="celebration-title" class="celebration-title rainbow-glow-font" aria-hidden="true">ROUND CLEAR!</div>
+        <div id="celebration-dancer-wrap" class="celebration-dancer-wrap">
+            <img id="celebration-dancer" src="images/victory_dancer.jpg" alt="Victory Champion Dancing" class="celebration-dancer-img">
+            <div id="trophy" class="trophy" aria-hidden="true">
+                <i class="fas fa-trophy"></i>
+            </div>
         </div>
-        <div class="win-message" id="win-message"></div>
+        <div class="win-message rainbow-glow-font" id="win-message"></div>
+        <div id="loser-taunt-banner" class="loser-taunt-banner" role="status"></div>
         <div class="steak-display" id="steak-display"></div>
         <!-- Rules container (reused to show help or the game-over rules) -->
         <div id="rules-content" style="max-width:720px; padding:12px; color:#fff; display:none;"></div>
-        <button id="play-again-btn" class="btn btn-game btn-lg" type="button">Play Again</button>
-        <button id="end-game-btn" class="btn btn-game btn-lg" type="button" hidden>End Game</button>
+        <div class="celebration-actions">
+            <button id="play-again-btn" class="btn btn-game btn-lg celebration-btn-primary" type="button">🃏 Play Again</button>
+            <button id="end-game-btn" class="btn btn-game btn-lg celebration-btn-secondary" type="button" hidden>🚪 End Game</button>
+        </div>
     </div>
 
     <!-- Bootstrap & jQuery -->

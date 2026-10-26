@@ -25,6 +25,7 @@ const gameState = {
     handWinners: [],
     stackedPoints: 0,
     currentStake: 1, // 1 or 2
+    scoringMode: localStorage.getItem('rung-scoring-mode') || 'classic_3_2',
     consecutiveWins: 0,
     totalHandsPlayed: 0,
     lastWinningTeam: null,
@@ -43,6 +44,7 @@ const gameState = {
     lastPlayInfoByPlayer: {1:null,2:null,3:null,4:null},
     botBanter: null,
     botBanterLog: [],
+    lastReaction: null,
     customEmojis: [],
     reactionTimer: null,
     announcementTimer: null,
@@ -55,8 +57,8 @@ const SUITS = ['hearts', 'diamonds', 'clubs', 'spades'];
 const SUIT_SYMBOLS = {'hearts': '♥', 'diamonds': '♦', 'clubs': '♣', 'spades': '♠'};
 const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
 const RANK_VALUES = { '2': 0, '3': 1, '4': 2, '5': 3, '6': 4, '7': 5, '8': 6, '9': 7, '10': 8, 'J': 9, 'Q': 10, 'K': 11, 'A': 12 };
-const ONLINE_TURN_TIMEOUT_MS = 15000;
-const MAX_MISSED_TURNS = 3;
+const ONLINE_TURN_TIMEOUT_MS = 45000;
+const MAX_MISSED_TURNS = 6;
 const AI_REACTIONS = ['😎', '😅', '🤔', '🔥', '👏', '😮', '😂', '❤️', 'Unlucky!'];
 const PUNJABI_BOT_LINES = [
     { text: 'ਸਾਥੀ, ਹੁਣ ਆਪਣੀ ਚਾਲ ਸੋਚ ਸਮਝ ਕੇ ਖੇਡੋ!', cue: 'partner' },
@@ -111,14 +113,47 @@ const onlineState = {
     voicePeers: new Map(),
     publishedGameKey: null,
     lastBotBanterId: null,
+    lastReactionId: null,
     pendingRequests: new Map(),
+    kickedBotSeats: new Set(),
+    reservedPlayerIds: new Map(),
     notifiedRequestKeys: new Set(),
     requestTimer: null,
     pendingRoom: null,
     pendingRoomCode: null,
     pendingRequestAsViewer: false,
+    pendingPreferredSeatIndex: null,
     dealCompleted: false
 };
+
+const SCORING_MODES = ['single_hand', 'classic_3_2', 'two_plus'];
+
+function scoringModeLabel(mode) {
+    switch (mode) {
+        case 'single_hand':
+            return 'Single Hand = 1 Pt';
+        case 'two_plus':
+            return '2+ Hands Wins Points';
+        case 'classic_3_2':
+        default:
+            return '1st 3 Hands = 3 Pts, then 2+ Hands';
+    }
+}
+
+function setScoringMode(mode) {
+    if (!SCORING_MODES.includes(mode)) return;
+    gameState.scoringMode = mode;
+    localStorage.setItem('rung-scoring-mode', mode);
+    $(`input[name="startup-scoring-mode"][value="${mode}"]`).prop('checked', true);
+    $(`input[name="modal-scoring-mode"][value="${mode}"]`).prop('checked', true);
+    $(`input[name="trump-scoring-mode"][value="${mode}"]`).prop('checked', true);
+    $('#trump-scoring-options [data-scoring-rule]').each(function() {
+        $(this).toggleClass('is-active', $(this).attr('data-scoring-rule') === mode);
+    });
+    if ($('.game-container').hasClass('is-active')) {
+        updateUI();
+    }
+}
 
 function nextBotName(playerId) {
     const used = new Set(gameState.players
@@ -127,6 +162,37 @@ function nextBotName(playerId) {
     const available = BOT_NAMES.filter(name => !used.has(name.toLowerCase()));
     const pool = available.length ? available : BOT_NAMES;
     return `${pool[Math.floor(Math.random() * pool.length)]} (Bot)`;
+}
+
+async function connectApprovedRoom(firebase, roomId, uid) {
+    subscribeToRoom(roomId);
+    if (!onlineState.isViewer) {
+        onlineState.handUnsubscribe?.();
+        onlineState.handUnsubscribe = firebase.listenPrivateHand(
+            roomId, uid, acceptPrivateHand, error => {
+                console.error('Private hand subscription failed:', error);
+                showFirebaseError('Unable to load your private hand.');
+            });
+        firebase.getPrivateHand?.(roomId, uid).then(hand => {
+            if (hand) acceptPrivateHand(hand);
+        }).catch(() => {});
+    }
+
+    const room = await firebase.getRoom(roomId);
+    if (!room || onlineState.roomId !== roomId || onlineState.mode !== 'client') return;
+    onlineState.room = room;
+    const mySeat = (room.seats || []).findIndex(s => s && s.uid === uid && !s.isBot);
+    if (mySeat >= 0) {
+        onlineState.seatIndex = mySeat;
+        onlineState.isViewer = false;
+    }
+    renderRoomLobby(room);
+    if ((room.status === 'PLAYING' || room.status === 'COMPLETED') && room.publicState) {
+        showGameScreen();
+        acceptPublicGameState(room.publicState, room.seats);
+    } else {
+        $('#room-lobby-status').text('Seat approved. Waiting for the host to start the game.');
+    }
 }
 
 // Early-safe helper so initializeGame can call it without ReferenceError
@@ -157,11 +223,14 @@ function refreshMyRunningTables() {
 
 function renderMyRunningTables(rooms) {
     onlineState.myRoomsById = Object.fromEntries(rooms.map(room => [room.id, room]));
+    const section = $('.my-running-tables');
     const list = $('#my-running-tables-list').empty();
     if (!rooms.length) {
+        section.prop('hidden', true);
         list.append('<p>You do not have a running table to resume.</p>');
         return;
     }
+    section.prop('hidden', false);
     rooms.forEach(room => {
         const seat = room.seats.find(item => item.uid === window.rungFirebase?.user.uid);
         const row = $('<div class="public-table-item"></div>');
@@ -200,6 +269,62 @@ function scheduleAiSelectTrump(ms = 1500) {
 // Initialize the game
 $(document).ready(function() {
     $('#player-name-input').val(onlineState.name);
+    const fallbackLocalId = localStorage.getItem('rung-local-player-id') || `P-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    localStorage.setItem('rung-local-player-id', fallbackLocalId);
+    $('#player-id-label').text(`Player ID: ${fallbackLocalId}`);
+    if (!$('#join-player-id-input').val()) {
+        $('#join-player-id-input').val(fallbackLocalId);
+    }
+
+    // 3-Tab Navigation on Landing Page (Home | Hall of Fame | How to Play)
+    $('.lobby-tabs').on('click', '[data-lobby-tab]', function() {
+        const targetTab = $(this).attr('data-lobby-tab');
+        $('.lobby-tab-btn').removeClass('is-active').attr('aria-selected', 'false');
+        $(this).addClass('is-active').attr('aria-selected', 'true');
+        $('.lobby-tab-panel').removeClass('is-active').prop('hidden', true);
+        const panelMap = {
+            home: '#lobby-tab-home',
+            hall: '#lobby-tab-hall',
+            rules: '#lobby-tab-rules'
+        };
+        const panelSelector = panelMap[targetTab] || '#lobby-tab-home';
+        $(panelSelector).addClass('is-active').prop('hidden', false);
+        if (targetTab === 'hall') {
+            refreshHallOfFame();
+        }
+    });
+
+    // Copy Player ID button
+    $('#copy-player-id-btn').on('click', async function() {
+        const rawText = $('#player-id-label').text().replace(/^Player ID:\s*/i, '').trim();
+        if (!rawText) return;
+        try {
+            await navigator.clipboard.writeText(rawText);
+            const btn = $(this);
+            btn.text('Copied!');
+            setTimeout(() => btn.text('Copy ID'), 1600);
+        } catch (err) {
+            console.warn('Clipboard copy failed:', err);
+        }
+    });
+
+    // Host Pre-Approve Friend by Player ID
+    $('#host-preapprove-friend-btn').on('click', async function() {
+        const friendPid = String($('#host-friend-player-id').val() || '').trim().toUpperCase();
+        const seatIdx = Number($('#host-friend-seat-select').val() ?? 2);
+        if (!Number.isInteger(seatIdx) || seatIdx < 1 || seatIdx > 3) return;
+        if (friendPid) {
+            onlineState.reservedPlayerIds.set(friendPid, seatIdx);
+        }
+        await kickBotForFriend(seatIdx);
+        if (friendPid) {
+            const code = onlineState.room?.tableCode || onlineState.room?.inviteCode || '';
+            const msg = `Bot kicked from Seat ${seatIdx + 1} and reserved for Player ID ${friendPid}! Share Table ID ${code} with your friend.`;
+            $('#room-lobby-status').removeClass('is-error').text(msg);
+            setStatusMessage(msg);
+        }
+    });
+
     $('#enter-lobby-btn').on('click', showHallOfFame);
     $('#refresh-rankings-btn').on('click', refreshHallOfFame);
     $('#refresh-tables-btn').on('click', refreshPublicTables);
@@ -210,14 +335,27 @@ $(document).ready(function() {
         localStorage.setItem('rung-player-name', name);
         $(this).val(name);
     });
+    $('#play-solo-btn').on('click', playSoloGame);
     $('#play-random-btn').on('click', playRandomTable);
-    $('#create-table-btn').on('click', () => $('#create-table-modal').prop('hidden', false));
+    $('#create-table-btn').on('click', () => {
+        setScoringMode(gameState.scoringMode);
+        $('#create-table-modal').prop('hidden', false);
+    });
     $('#cancel-create-table-btn').on('click', () => $('#create-table-modal').prop('hidden', true));
     $('#create-table-form').on('submit', createTableFromForm);
     $('#join-table-form').on('submit', joinTableFromCode);
+    $('input[name="startup-scoring-mode"], input[name="modal-scoring-mode"], input[name="trump-scoring-mode"]').on('change', function() {
+        setScoringMode($(this).val());
+    });
+    $('#trump-scoring-options').on('click', '[data-scoring-rule]', function() {
+        setScoringMode($(this).attr('data-scoring-rule'));
+    });
+    setScoringMode(gameState.scoringMode);
     $('#public-tables-list').on('click', '[data-join-room]', function() {
         const roomId = $(this).attr('data-join-room');
-        joinPublicRoom(roomId);
+        const seatAttr = $(this).attr('data-preferred-seat');
+        const preferredSeat = seatAttr !== undefined && seatAttr !== '' ? Number(seatAttr) : null;
+        joinPublicRoom(roomId, preferredSeat);
     });
     $('#public-tables-list').on('click', '[data-watch-room]', function() {
         watchPublicRoom($(this).attr('data-watch-room'));
@@ -233,6 +371,12 @@ $(document).ready(function() {
     $('#cancel-room-request-btn').on('click', cancelRoomRequest);
     $('#room-requests-list').on('click', '[data-approve-request]', approveRoomRequest);
     $('#room-requests-list').on('click', '[data-reject-request]', rejectRoomRequest);
+    $('#room-seat-list').on('click', '[data-kick-bot-seat]', function() {
+        kickBotForFriend(Number($(this).attr('data-kick-bot-seat')));
+    });
+    $('#room-seat-list').on('click', '[data-kick-human-seat]', function() {
+        kickHumanPlayerToBot(Number($(this).attr('data-kick-human-seat')));
+    });
     $('#host-join-notice-open').on('click', () => {
         $('#host-join-notice').prop('hidden', true);
         if (onlineState.isHost && onlineState.room) showRoomLobby(onlineState.room);
@@ -242,6 +386,24 @@ $(document).ready(function() {
     $('#lobby-btn').on('click', returnToLobby);
     $('#table-admin-btn').on('click', () => {
         if (onlineState.isHost && onlineState.room) showRoomLobby(onlineState.room);
+    });
+    $('#top-kick-bot-btn').on('click', () => {
+        if (onlineState.isHost && onlineState.room) {
+            showRoomLobby(onlineState.room);
+        } else {
+            kickBotForFriend(2);
+        }
+    });
+    $('#live-table-badge').on('click', copyInviteCode);
+    $('#viewer-take-seat-btn').on('click', requestBotSeatFromViewer);
+    $('.game-table').on('click', '.inline-kick-bot-btn, [data-inline-kick-bot]', async function(event) {
+        event.stopPropagation();
+        const seatIndex = Number($(this).attr('data-kick-bot-seat') ?? $(this).attr('data-inline-kick-bot'));
+        if (!Number.isInteger(seatIndex)) return;
+        await kickBotForFriend(seatIndex);
+        if (onlineState.isHost && onlineState.room) {
+            showRoomLobby(onlineState.room);
+        }
     });
     $('#voice-toggle-btn').on('click', toggleVoice);
     $('#punjabi-voice-toggle').prop(
@@ -254,10 +416,12 @@ $(document).ready(function() {
     window.addEventListener('rung-firebase-ready', () => {
         $('#firebase-status').text('Connected to Firebase. Opening Hall of Fame…');
         window.rungFirebaseReady.then(firebase => {
-            $('#player-id-label').text(`Player ID: P-${firebase.user.uid.toUpperCase()}`);
+            const pid = `P-${firebase.user.uid.slice(0, 8).toUpperCase()}`;
+            localStorage.setItem('rung-local-player-id', pid);
+            $('#player-id-label').text(`Player ID: ${pid}`);
+            $('#join-player-id-input').val(pid);
         }).catch(error => {
             console.error('Loading player ID failed:', error);
-            $('#player-id-label').text('Player ID unavailable');
         });
         refreshHallOfFame();
         refreshPublicTables();
@@ -276,6 +440,8 @@ $(document).ready(function() {
 
     $('#new-game-btn').click(function() {
         if (!prepareNewGame()) return;
+        rulesAreOpen = false;
+        $('#celebration').hide();
         (async () => {
 			try {
 				await initializeGame();
@@ -290,8 +456,18 @@ $(document).ready(function() {
             closeRules();
             return;
         }
+        if (onlineState.isReplica && !onlineState.isViewer && onlineState.roomId) {
+            rulesAreOpen = false;
+            $('#celebration').hide();
+            setStatusMessage('Starting rematch with partner…');
+            firebaseApi().then(firebase =>
+                firebase.submitAction(onlineState.roomId, onlineState.seatIndex, '__REMATCH__', 'reaction', currentPlayerName())
+            ).catch(err => console.error('Rematch request failed:', err));
+            return;
+        }
         if (!prepareNewGame()) return;
-        closeRules();
+        rulesAreOpen = false;
+        $('#celebration').hide();
         (async () => {
 			try {
 				await initializeGame();
@@ -352,6 +528,22 @@ async function firebaseApi() {
 function openTrumpSelection() {
     if (gameState.gameState !== 'TRUMP_SELECTION' ||
         !$('.game-container').hasClass('is-active')) return;
+    $('#celebration').hide();
+    const preview = $('#trump-hand-preview').empty();
+    const localIdx = getLocalPerspectiveSeatIndex();
+    const chooser = gameState.players.find(p => p.id === gameState.trumpChooserId) || gameState.players[localIdx];
+    const cardsToShow = (chooser && chooser.cards && chooser.cards.length && chooser.cards[0].suit !== 'hidden')
+        ? chooser.cards
+        : (gameState.players[localIdx]?.cards || []);
+    cardsToShow.forEach(card => {
+        if (!card || card.suit === 'hidden') return;
+        const symbol = SUIT_SYMBOLS[card.suit] || '';
+        const colorClass = (card.suit === 'hearts' || card.suit === 'diamonds') ? 'suit-red' : 'suit-black';
+        const pill = $('<div class="trump-preview-card"></div>')
+            .append($(`<span class="trump-preview-rank ${colorClass}"></span>`).text(card.rank))
+            .append($(`<span class="trump-preview-suit ${colorClass}"></span>`).text(symbol));
+        preview.append(pill);
+    });
     $('#trump-selection').addClass('is-visible').attr('aria-hidden', 'false');
     $('.game-table').addClass('is-trump-selection');
 }
@@ -359,6 +551,25 @@ function openTrumpSelection() {
 function closeTrumpSelection() {
     $('#trump-selection').removeClass('is-visible').attr('aria-hidden', 'true');
     $('.game-table').removeClass('is-trump-selection');
+}
+
+function getLocalPerspectiveSeatIndex() {
+    return onlineState.isReplica && Number.isInteger(onlineState.seatIndex)
+        ? onlineState.seatIndex
+        : 0;
+}
+
+function getDisplayTeamNumber(team) {
+    return gameState.players[getLocalPerspectiveSeatIndex()]?.team === team ? 1 : 2;
+}
+
+function getCanonicalSeatIndex(displaySlot) {
+    return (getLocalPerspectiveSeatIndex() + displaySlot) % gameState.players.length;
+}
+
+function getDisplaySeatIndex(canonicalSeatIndex) {
+    return (canonicalSeatIndex - getLocalPerspectiveSeatIndex() + gameState.players.length) %
+        gameState.players.length;
 }
 
 async function showHallOfFame() {
@@ -532,32 +743,48 @@ function refreshPublicTables() {
 function renderPublicTables(rooms) {
     const list = $('#public-tables-list').empty();
     if (!rooms.length) {
-        list.append('<p>No public tables are open yet. Start one with Play Random.</p>');
+        list.append('<p>No public tables are open yet. Start one with Play Random or Create Table.</p>');
         return;
     }
     rooms.forEach(room => {
-        const humanSeats = room.seats.filter(seat => !seat.isBot).length;
-        const vacantSeats = room.seats
+        const seats = Array.isArray(room.seats) ? room.seats : [];
+        const humanSeats = seats.filter(seat => !seat.isBot).length;
+        const vacantSeats = seats
             .map((seat, index) => ({ seat, index }))
             .filter(({ seat }) => seat.isBot);
-        const status = room.status === 'PLAYING' ? 'In progress' : 'Waiting';
-        const tableCode = room.tableCode || 'Unavailable';
+        const partnerSeatBot = Boolean(seats[2]?.isBot);
+        const status = room.status === 'PLAYING' ? 'LIVE GAME' : 'WAITING';
+        const tableCode = room.tableCode || room.inviteCode || 'Unavailable';
+        const ruleMode = room.publicState?.scoringMode || room.scoringMode || 'classic_3_2';
+        const handsPlayed = room.publicState?.totalHandsPlayed ?? 0;
+        const scoreSummary = room.status === 'PLAYING' && room.publicState
+            ? ` · Hand ${handsPlayed}/13 · Score ${room.publicState.team1Points || 0}-${room.publicState.team2Points || 0}`
+            : '';
         const row = $('<div class="public-table-item"></div>');
         row.append($('<div></div>')
-            .append($('<strong></strong>').text(`${room.hostName || 'Player'}’s table`))
+            .append($('<strong></strong>').text(`${room.hostName || 'Player'}’s table (${status})`))
             .append($('<small></small>').text(
-                `Table ID: ${tableCode} · ${status} · ${humanSeats}/4 players · ` +
-                `${vacantSeats.length ? `Seats ${vacantSeats.map(({ index }) => index + 1).join(', ')} vacant` : 'No vacant seats'} · ` +
+                `Table ID: ${tableCode}${scoreSummary} · Rule: ${scoringModeLabel(ruleMode)} · ${humanSeats}/4 human · ` +
+                `${vacantSeats.length ? `Bot seats open: ${vacantSeats.map(({ index }) => index === 2 ? 'Seat 3 (Partner)' : `Seat ${index + 1}`).join(', ')}` : 'Full (4/4 humans)'} · ` +
                 `${Number(room.spectatorCount || 0)} watching`)));
+        const actions = $('<div class="public-table-actions"></div>');
         if (vacantSeats.length && (room.status === 'WAITING' || room.status === 'PLAYING')) {
-            row.append($('<button type="button" class="lobby-secondary">Request seat</button>')
+            if (partnerSeatBot) {
+                actions.append($('<button type="button" class="lobby-primary">Partner Host (Seat 3)</button>')
+                    .attr('data-join-room', room.id)
+                    .attr('data-preferred-seat', '2'));
+            }
+            actions.append($('<button type="button" class="lobby-secondary"></button>')
+                .text(room.status === 'PLAYING' ? 'Replace Bot (Play Live)' : 'Take Bot Seat')
                 .attr('data-join-room', room.id));
         } else if (room.status === 'WAITING') {
-            row.append($('<span class="room-request-note"></span>').text('Table is full'));
+            actions.append($('<span class="room-request-note"></span>').text('Table is full'));
         }
-        if (room.allowViewers) {
-            row.append($('<button type="button" class="lobby-secondary">Watch</button>').attr('data-watch-room', room.id));
+        if (room.allowViewers !== false) {
+            actions.append($('<button type="button" class="lobby-secondary">Watch Live</button>')
+                .attr('data-watch-room', room.id));
         }
+        row.append(actions);
         list.append(row);
     });
 }
@@ -570,6 +797,37 @@ function currentPlayerName() {
     return name;
 }
 
+function isFreshPublicRoom(room) {
+    return Boolean(room && (room.status === 'WAITING' || room.status === 'PLAYING'));
+}
+
+async function playSoloGame() {
+    clearRoomSubscriptions();
+    if (onlineState.voiceStream) await toggleVoice();
+    onlineState.mode = null;
+    onlineState.roomId = null;
+    onlineState.room = null;
+    onlineState.seatIndex = 0;
+    onlineState.isHost = false;
+    onlineState.isViewer = false;
+    onlineState.isReplica = false;
+    onlineState.hasStarted = false;
+    onlineState.pendingAction = false;
+    onlineState.activeTrumpPrompt = false;
+    const rawName = String($('#player-name-input').val() || onlineState.name || '').trim();
+    gameState.players[0].name = rawName ? normalizePlayerName(rawName) : 'You';
+    gameState.players[0].uid = null;
+    gameState.players[0].isHuman = true;
+    gameState.players[0].isBot = false;
+    gameState.players.slice(1).forEach(player => {
+        player.uid = null;
+        player.isHuman = false;
+        player.isBot = true;
+    });
+    showGameScreen();
+    await initializeGame();
+}
+
 async function playRandomTable() {
     try {
         const firebase = await firebaseApi();
@@ -577,12 +835,13 @@ async function playRandomTable() {
         const candidate = rooms.find(room => room.hostUid !== firebase.user.uid &&
             !room.seats.some(seat => seat.uid === firebase.user.uid) &&
             room.seats.some(seat => seat.isBot) &&
-            (room.status === 'WAITING' || room.status === 'PLAYING'));
+            isFreshPublicRoom(room));
         if (candidate) {
-            await joinCloudRoom(candidate, null, currentPlayerName(), false);
+            const preferredSeat = candidate.seats?.[2]?.isBot ? 2 : null;
+            await joinCloudRoom(candidate, null, currentPlayerName(), false, preferredSeat);
             return;
         }
-        const room = await firebase.createRoom(currentPlayerName(), 'public');
+        const room = await firebase.createRoom(currentPlayerName(), 'public', gameState.scoringMode);
         configureHostRoom(room);
         showGameScreen();
         await startOnlineGame();
@@ -597,7 +856,9 @@ async function createTableFromForm(event) {
     $('#create-table-error').text('');
     try {
         const visibility = $('input[name="table-visibility"]:checked').val();
-        const room = await (await firebaseApi()).createRoom(currentPlayerName(), visibility);
+        const selectedRule = $('input[name="modal-scoring-mode"]:checked').val() || gameState.scoringMode;
+        setScoringMode(selectedRule);
+        const room = await (await firebaseApi()).createRoom(currentPlayerName(), visibility, gameState.scoringMode);
         $('#create-table-modal').prop('hidden', true);
         configureHostRoom(room);
         showRoomLobby(room);
@@ -614,10 +875,13 @@ async function joinTableFromCode(event) {
         showFirebaseError('Enter the 6-character invite code.');
         return;
     }
+    const roleChoice = $('#join-code-role').val() || 'partner';
+    const asViewer = roleChoice === 'viewer';
+    const preferredSeatIndex = roleChoice === 'partner' ? 2 : null;
     try {
         const firebase = await firebaseApi();
         const room = await firebase.resolveRoomCode(code);
-        await joinCloudRoom(room, code, currentPlayerName(), false);
+        await joinCloudRoom(room, code, currentPlayerName(), asViewer, preferredSeatIndex);
         $('#invite-code-input').val('');
     } catch (error) {
         console.error('Joining by invite code failed:', error);
@@ -625,14 +889,14 @@ async function joinTableFromCode(event) {
     }
 }
 
-async function joinPublicRoom(roomId) {
+async function joinPublicRoom(roomId, preferredSeatIndex = null) {
     const room = onlineState.publicRoomsById?.[roomId];
     if (!room) {
         showFirebaseError('That table is no longer available.');
         return;
     }
     try {
-        await joinCloudRoom(room, null, currentPlayerName(), false);
+        await joinCloudRoom(room, null, currentPlayerName(), false, preferredSeatIndex);
     } catch (error) {
         console.error('Joining public table failed:', error);
         showFirebaseError(error.message || 'Could not join that table.');
@@ -646,6 +910,26 @@ async function watchPublicRoom(roomId) {
         return;
     }
     await joinCloudRoom(room, null, currentPlayerName(), true);
+}
+
+async function requestBotSeatFromViewer() {
+    const room = onlineState.room || onlineState.publicRoomsById?.[onlineState.roomId];
+    if (!room) {
+        setStatusMessage('Table information is not available right now.');
+        return;
+    }
+    const partnerOpen = Boolean(room.seats?.[2]?.isBot);
+    const anyBotOpen = Boolean(room.seats?.some(seat => seat.isBot));
+    if (!anyBotOpen) {
+        setStatusMessage('All 4 seats are currently occupied by human players.');
+        return;
+    }
+    try {
+        await joinCloudRoom(room, room.inviteCode || room.tableCode || null, currentPlayerName(), false, partnerOpen ? 2 : null);
+    } catch (error) {
+        console.error('Requesting a bot seat from viewer mode failed:', error);
+        setStatusMessage(error.message || 'Could not request the bot seat.');
+    }
 }
 
 async function resumeRunningRoom(roomId) {
@@ -662,32 +946,50 @@ async function resumeRunningRoom(roomId) {
     }
 }
 
-async function joinCloudRoom(room, code, name, asViewer) {
+async function joinCloudRoom(room, code, name, asViewer, preferredSeatIndex = null) {
     const firebase = await firebaseApi();
-    const existingSeat = room.seats?.findIndex(seat => seat.uid === firebase.user.uid) ?? -1;
+    const existingSeat = room.seats?.findIndex(seat => seat && seat.uid === firebase.user.uid && !seat.isBot) ?? -1;
     const wasViewer = (room.viewerUids || []).includes(firebase.user.uid);
-    if (existingSeat >= 0 || wasViewer) {
+    if (existingSeat >= 0 || (wasViewer && asViewer)) {
         if (room.hostUid === firebase.user.uid) {
             await resumeHostRoom(room);
             return;
         }
-        resumeCloudRoom(room, existingSeat, asViewer || wasViewer);
+        resumeCloudRoom(room, existingSeat, existingSeat >= 0 ? false : Boolean(asViewer));
         return;
     }
 
     clearRoomSubscriptions();
-    onlineState.mode = 'joining';
+    onlineState.mode = asViewer ? 'client' : 'joining';
     onlineState.roomId = room.id;
+    onlineState.room = room;
     onlineState.isHost = false;
     onlineState.isViewer = asViewer;
-    onlineState.isReplica = false;
+    onlineState.isReplica = asViewer;
     onlineState.pendingRoom = room;
     onlineState.pendingRoomCode = code;
     onlineState.pendingRequestAsViewer = asViewer;
-    $('#room-lobby-title').text(asViewer ? 'Joining as viewer…' : 'Requesting a seat…');
-    $('#room-lobby-description').text(asViewer
-        ? 'Connecting to the public game as a viewer.'
-        : 'Your request is being sent to the table host.');
+    onlineState.pendingPreferredSeatIndex = Number.isInteger(preferredSeatIndex) ? preferredSeatIndex : null;
+
+    if (asViewer) {
+        // Immediately let global viewers watch live games while registering viewer request in the background
+        firebase.requestViewer(room.id, name).catch(err => console.warn('Viewer registration note:', err));
+        subscribeToRoom(room.id);
+        $('#room-lobby').prop('hidden', true);
+        if ((room.status === 'PLAYING' || room.status === 'COMPLETED') && room.publicState) {
+            showGameScreen();
+            acceptPublicGameState(room.publicState, room.seats);
+            setStatusMessage(`Watching ${room.hostName || 'Player'}’s live game. You can send reactions or take an open bot seat anytime!`);
+        } else {
+            showRoomLobby(room);
+            $('#room-lobby-status').removeClass('is-error').text('Watching table lobby · game will appear automatically when started.');
+        }
+        return;
+    }
+
+    const seatLabel = preferredSeatIndex === 2 ? 'Seat 3 (Host Partner)' : 'an open Bot Seat';
+    $('#room-lobby-title').text(`Requesting ${seatLabel}…`);
+    $('#room-lobby-description').text('Your request is being sent to the table host to replace a bot and continue the game.');
     $('#room-lobby-status').removeClass('is-error').text('Sending your request…');
     $('#room-invite-code, #copy-invite-code-btn, #start-table-btn').prop('hidden', true);
     $('#join-as-viewer-btn').prop('hidden', true);
@@ -696,21 +998,29 @@ async function joinCloudRoom(room, code, name, asViewer) {
     $('#room-lobby').prop('hidden', false);
 
     try {
-        if (asViewer) {
-            await firebase.requestViewer(room.id, name);
-        } else {
-            const playerId = `P-${firebase.user.uid.toUpperCase()}`;
-            $('#player-id-label').text(`Player ID: ${playerId}`);
-            await firebase.requestSeat(room.id, name, code || room.inviteCode || null, playerId);
-        }
+        const customPid = String($('#join-player-id-input').val() || '').trim().toUpperCase();
+        const playerId = customPid || `P-${firebase.user.uid.slice(0, 8).toUpperCase()}`;
+        $('#player-id-label').text(`Player ID: ${playerId}`);
+        $('#join-player-id-input').val(playerId);
+        await firebase.requestSeat(
+            room.id,
+            name,
+            code || room.inviteCode || room.tableCode || null,
+            playerId,
+            onlineState.pendingPreferredSeatIndex
+        );
         startApprovalCountdown();
         onlineState.joinRequestUnsubscribe = firebase.listenMemberRequest(
             room.id,
             firebase.user.uid,
             request => {
                 if (request.status === 'accepted') {
-                    onlineState.seatIndex = request.seatIndex;
-                    onlineState.isViewer = request.role === 'viewer';
+                    const hasPlayerSeat = Number.isInteger(request.seatIndex) && request.seatIndex >= 0;
+                    if (!asViewer && request.role === 'viewer' && !hasPlayerSeat) {
+                        return;
+                    }
+                    onlineState.seatIndex = hasPlayerSeat ? request.seatIndex : null;
+                    onlineState.isViewer = hasPlayerSeat ? false : (request.role === 'viewer');
                     onlineState.isReplica = true;
                     onlineState.mode = 'client';
                     onlineState.joinRequestUnsubscribe?.();
@@ -718,21 +1028,14 @@ async function joinCloudRoom(room, code, name, asViewer) {
                     clearInterval(onlineState.requestTimer);
                     onlineState.requestTimer = null;
                     $('#cancel-room-request-btn, #retry-room-request-btn').prop('hidden', true);
-                    onlineState.room = room;
-                    subscribeToRoom(room.id);
-                    if (!onlineState.isViewer) {
-                        onlineState.handUnsubscribe = firebase.listenPrivateHand(
-                            room.id, firebase.user.uid, acceptPrivateHand, error => {
-                                console.error('Private hand subscription failed:', error);
-                                showFirebaseError('Unable to load your private hand.');
-                            });
-                    }
                     $('#room-lobby-status').text(onlineState.isViewer
                         ? 'Viewer connected. You can watch the table.'
-                        : 'Seat approved. Rejoining the live game…');
-                    renderRoomLobby(room);
-                    if (request.roomStatus === 'PLAYING') showGameScreen();
-                    else $('#room-lobby-status').text('Seat approved. Waiting for the host to start the game.');
+                        : `Seat ${request.seatIndex + 1} approved! Joining live game with the bot's cards…`);
+                    connectApprovedRoom(firebase, room.id, firebase.user.uid)
+                        .catch(error => {
+                            console.error('Loading the approved table failed:', error);
+                            showFirebaseError('Your seat was approved, but the live table could not be loaded. Retry or refresh the table.');
+                        });
                 } else if (request.status === 'full' || request.status === 'rejected') {
                     clearInterval(onlineState.requestTimer);
                     onlineState.requestTimer = null;
@@ -798,7 +1101,8 @@ async function retryRoomRequest() {
             onlineState.pendingRoom,
             onlineState.pendingRoomCode,
             currentPlayerName(),
-            onlineState.pendingRequestAsViewer
+            onlineState.pendingRequestAsViewer,
+            onlineState.pendingPreferredSeatIndex
         );
     } catch (error) {
         console.error('Retrying the table request failed:', error);
@@ -843,18 +1147,22 @@ function resumeCloudRoom(room, seatIndex, asViewer) {
     onlineState.room = room;
     onlineState.seatIndex = seatIndex >= 0 ? seatIndex : null;
     onlineState.isHost = false;
-    onlineState.isViewer = asViewer || isHost || seatIndex < 0;
+    onlineState.isViewer = (isHost || seatIndex < 0) ? true : false;
     onlineState.isReplica = true;
     onlineState.hasStarted = room.status === 'PLAYING';
     onlineState.pendingRoom = room;
     onlineState.pendingRoomCode = room.inviteCode || null;
     subscribeToRoom(room.id);
     if (!onlineState.isViewer) {
+        onlineState.handUnsubscribe?.();
         onlineState.handUnsubscribe = firebase.listenPrivateHand(
             room.id, firebase.user.uid, acceptPrivateHand, error => {
                 console.error('Private hand subscription failed while resuming:', error);
                 showFirebaseError('The table reconnected, but your private hand could not be loaded.');
             });
+        firebase.getPrivateHand?.(room.id, firebase.user.uid).then(hand => {
+            if (hand) acceptPrivateHand(hand);
+        }).catch(() => {});
     }
     $('#room-lobby').prop('hidden', true);
     if (room.status === 'PLAYING' && room.publicState) {
@@ -899,7 +1207,7 @@ async function resumeHostRoom(room) {
         'stackedPoints', 'currentStake', 'consecutiveWins', 'totalHandsPlayed',
         'lastWinningTeam', 'lastHandWinnerId', 'currentChallengeTeam',
         'stake1Completed', 'playSeqCounter', 'lastPlayedPlayerId',
-        'initialLeadTeam', 'leadHolderPlayerId'
+        'initialLeadTeam', 'leadHolderPlayerId', 'scoringMode'
     ];
     arrayKeys.forEach(key => {
         if (Array.isArray(saved[key])) gameState[key] = saved[key];
@@ -986,6 +1294,10 @@ function configureHostRoom(room) {
     onlineState.roomUnsubscribe = null;
     onlineState.pendingRequests = new Map();
     onlineState.notifiedRequestKeys = new Set();
+    onlineState.kickedBotSeats = new Set();
+    if (room.scoringMode) {
+        setScoringMode(room.scoringMode);
+    }
     const user = window.rungFirebase.user;
     room.seats.forEach((seat, index) => {
         const player = gameState.players[index];
@@ -1040,6 +1352,29 @@ function configureHostRoom(room) {
             return;
         }
         onlineState.pendingRequests.set(request.uid, request);
+        // Auto-approve into a kicked bot seat if the host reserved by Player ID or kicked a bot for a friend!
+        const reqPid = String(request.playerId || '').trim().toUpperCase();
+        const reservedSeat = reqPid && onlineState.reservedPlayerIds?.has(reqPid)
+            ? onlineState.reservedPlayerIds.get(reqPid)
+            : null;
+        const requestedPref = Number.isInteger(request.preferredSeatIndex) ? request.preferredSeatIndex : null;
+        let autoSeat = null;
+        if (Number.isInteger(reservedSeat) && onlineState.room?.seats?.[reservedSeat]?.isBot) {
+            autoSeat = reservedSeat;
+            onlineState.reservedPlayerIds.delete(reqPid);
+        } else if (requestedPref !== null && onlineState.kickedBotSeats.has(requestedPref) &&
+            onlineState.room?.seats?.[requestedPref]?.isBot) {
+            autoSeat = requestedPref;
+        } else if (onlineState.kickedBotSeats.size > 0) {
+            const firstKicked = [...onlineState.kickedBotSeats].find(idx => onlineState.room?.seats?.[idx]?.isBot);
+            if (Number.isInteger(firstKicked)) autoSeat = firstKicked;
+        }
+        if (Number.isInteger(autoSeat)) {
+            onlineState.kickedBotSeats.delete(autoSeat);
+            acceptGuestIntoSeat(request.uid, autoSeat).catch(err =>
+                console.error('Auto-approving into kicked bot seat failed:', err));
+            return;
+        }
         renderPendingRequests();
     }, error => {
         console.error('Table member listener failed:', error);
@@ -1057,9 +1392,37 @@ function configureHostRoom(room) {
 function subscribeToRoom(roomId) {
     onlineState.roomUnsubscribe?.();
     onlineState.roomUnsubscribe = window.rungFirebase.listenRoom(roomId, room => {
-        if (onlineState.isReplica && !onlineState.isViewer &&
+        const myUid = window.rungFirebase?.user?.uid;
+        const mySeatIndex = myUid ? (room.seats || []).findIndex(s => s && s.uid === myUid && !s.isBot) : -1;
+        if (!onlineState.isHost && mySeatIndex >= 0) {
+            const switchedToSeated = onlineState.isViewer || onlineState.seatIndex !== mySeatIndex || !onlineState.handUnsubscribe;
+            onlineState.seatIndex = mySeatIndex;
+            onlineState.isViewer = false;
+            onlineState.isReplica = true;
+            onlineState.mode = 'client';
+            if (onlineState.joinRequestUnsubscribe) {
+                onlineState.joinRequestUnsubscribe();
+                onlineState.joinRequestUnsubscribe = null;
+            }
+            if (onlineState.requestTimer) {
+                clearInterval(onlineState.requestTimer);
+                onlineState.requestTimer = null;
+            }
+            $('#room-lobby').prop('hidden', true);
+            if (switchedToSeated) {
+                onlineState.handUnsubscribe?.();
+                onlineState.handUnsubscribe = window.rungFirebase.listenPrivateHand(
+                    roomId, myUid, acceptPrivateHand, error => {
+                        console.error('Private hand subscription failed:', error);
+                    }
+                );
+                window.rungFirebase.getPrivateHand?.(roomId, myUid).then(hand => {
+                    if (hand) acceptPrivateHand(hand);
+                }).catch(() => {});
+            }
+        } else if (onlineState.isReplica && !onlineState.isViewer &&
             Number.isInteger(onlineState.seatIndex) &&
-            room.seats?.[onlineState.seatIndex]?.uid !== window.rungFirebase.user.uid) {
+            room.seats?.[onlineState.seatIndex]?.uid !== myUid) {
             const removedName = gameState.players[onlineState.seatIndex]?.name || 'Player';
             leaveRoomLobby();
             returnToLobby();
@@ -1081,7 +1444,8 @@ function subscribeToRoom(roomId) {
         }
         if (onlineState.voiceStream) syncVoicePeers(room);
         renderRoomLobby(room);
-        if (room.status === 'PLAYING' && onlineState.isReplica && room.publicState) {
+        if ((room.status === 'PLAYING' || room.status === 'COMPLETED') &&
+            onlineState.isReplica && room.publicState) {
             showGameScreen();
             acceptPublicGameState(room.publicState, room.seats);
         } else if (room.status === 'WAITING' && !onlineState.isHost) {
@@ -1096,19 +1460,47 @@ function subscribeToRoom(roomId) {
 function renderRoomLobby(room) {
     const isHost = onlineState.isHost;
     const tableCode = room.tableCode || room.inviteCode || '';
-    const inviteCode = room.inviteCode || tableCode;
-    $('#room-lobby-title').text(room.status === 'PLAYING' ? 'Game in progress' : 'Waiting for players');
-    $('#room-lobby-description').text(`${room.visibility === 'private' ? 'Private' : 'Public'} table · ${Number(room.spectatorCount || 0)} viewer(s)`);
-    $('#room-invite-code').text(tableCode ? `Table ID: ${tableCode}` : '').prop('hidden', !isHost || !tableCode);
-    $('#copy-invite-code-btn').prop('hidden', !isHost || !tableCode)
+    const ruleMode = room.publicState?.scoringMode || room.scoringMode || gameState.scoringMode;
+    $('#room-lobby-title').text(room.status === 'PLAYING' ? 'Manage Live Table · Kick Bot / Invite Partner' : 'Waiting for players');
+    $('#room-lobby-description').text(
+        `${room.visibility === 'private' ? 'Private' : 'Public'} table · Rule: ${scoringModeLabel(ruleMode)} · ${Number(room.spectatorCount || 0)} viewer(s)`
+    );
+    $('#room-invite-code').text(tableCode ? `Table ID: ${tableCode}` : '').prop('hidden', !tableCode);
+    $('#copy-invite-code-btn').prop('hidden', !tableCode)
         .text(room.visibility === 'private' ? 'Copy table / invite ID' : 'Copy table ID');
+    $('#host-friend-invite-box').prop('hidden', !isHost);
     $('#start-table-btn').prop('hidden', !isHost || room.status !== 'WAITING');
     $('#join-as-viewer-btn').prop('hidden', isHost || room.visibility !== 'public' || onlineState.isViewer);
     const list = $('#room-seat-list').empty();
+    const roleLabels = ['Host (Team 1)', 'Opponent (Team 2)', 'Host Partner (Team 1)', 'Opponent (Team 2)'];
     (room.seats || []).forEach((seat, index) => {
         const row = $('<div class="room-seat"></div>');
-        row.append($('<span></span>').text(`${index + 1}. ${seat.name}`));
-        row.append($('<small></small>').text(seat.isBot ? 'BOT' : (seat.uid === window.rungFirebase?.user.uid ? 'YOU' : 'PLAYER')));
+        const isKickedReady = onlineState.kickedBotSeats?.has(index);
+        const seatInfo = $('<div class="room-seat-info"></div>');
+        seatInfo.append($('<strong></strong>').text(`Seat ${index + 1}: ${seat.name}`));
+        seatInfo.append($('<small class="room-seat-role"></small>').text(
+            `${roleLabels[index]} · ${seat.isBot ? (isKickedReady ? 'BOT KICKED (Ready for friend!)' : 'BOT') : (seat.uid === window.rungFirebase?.user.uid ? 'YOU' : 'HUMAN PLAYER')}`
+        ));
+        row.append(seatInfo);
+        if (isHost && index > 0) {
+            const actions = $('<div class="room-seat-actions"></div>');
+            if (seat.isBot) {
+                actions.append(
+                    $('<button type="button" class="lobby-primary room-kick-bot-btn"></button>')
+                        .attr('data-kick-bot-seat', index)
+                        .text(isKickedReady
+                            ? (index === 2 ? 'Partner Seat Open (Copy ID)' : 'Seat Open (Copy ID)')
+                            : (index === 2 ? 'Kick Bot · Invite Partner' : 'Kick Bot · Open Seat'))
+                );
+            } else {
+                actions.append(
+                    $('<button type="button" class="lobby-secondary room-kick-human-btn"></button>')
+                        .attr('data-kick-human-seat', index)
+                        .text('Replace with Bot')
+                );
+            }
+            row.append(actions);
+        }
         list.append(row);
     });
     $('#room-requests-section').prop('hidden', !isHost || onlineState.pendingRequests.size === 0);
@@ -1128,8 +1520,9 @@ function renderPendingRequests() {
         return preferredSeat(first) - preferredSeat(second);
     }).forEach(([uid, request]) => {
         const row = $('<div class="room-request-item"></div>');
+        const prefNote = request.preferredSeatIndex === 2 ? ' (wants Partner Seat 3)' : '';
         row.append($('<strong></strong>').text(
-            `${request.role === 'viewer' ? 'Viewer' : 'Player'} request · ${request.name || 'Guest'}`
+            `${request.role === 'viewer' ? 'Viewer' : 'Player'} request · ${request.name || 'Guest'}${prefNote}`
         ));
         if (request.playerId) {
             row.append($('<span class="room-request-note"></span>').text(request.playerId));
@@ -1137,18 +1530,21 @@ function renderPendingRequests() {
         const seatSelect = $('<select class="room-request-seat" aria-label="Bot seat to replace"></select>');
         const seats = (onlineState.room?.seats || []).map((seat, index) => ({ seat, index }));
         seats.sort((first, second) => {
-            const preferred = item => item.index === 2 ? 0 : item.index;
+            const preferred = item => {
+                if (Number.isInteger(request.preferredSeatIndex) && item.index === request.preferredSeatIndex) return -1;
+                return item.index === 2 ? 0 : item.index;
+            };
             return preferred(first) - preferred(second);
         }).forEach(({ seat, index }) => {
             if (seat.isBot) {
-                const role = index === 2 ? ' · host partner' : '';
+                const role = index === 2 ? ' · Host Partner (Team 1)' : ` · Opponent (Team ${seat.team})`;
                 seatSelect.append($('<option></option>').val(index)
-                    .text(`Replace ${seat.name}${role}`));
+                    .text(`Kick ${seat.name} -> Seat ${index + 1}${role}`));
             }
         });
         if (seatSelect.children().length) {
             row.append(seatSelect);
-            row.append($('<button type="button" class="lobby-primary">Approve</button>')
+            row.append($('<button type="button" class="lobby-primary">Kick Bot & Approve</button>')
                 .attr('data-approve-request', uid));
         } else {
             row.append($('<span class="room-request-note"></span>').text('No bot seats available'));
@@ -1163,9 +1559,9 @@ function notifyHostOfJoinRequest(request) {
     const isViewer = request.role === 'viewer';
     const message = isViewer
         ? `${request.name || 'A viewer'} wants to watch the table.`
-        : `${request.name || 'A player'} is waiting for approval to join.`;
+        : `${request.name || 'A player'} wants to take a bot seat${request.preferredSeatIndex === 2 ? ' as your Partner (Seat 3)' : ''}!`;
     $('#host-join-notice-text').text(message);
-    $('#host-join-notice-open').text(isViewer ? 'Open table' : 'Review request');
+    $('#host-join-notice-open').text(isViewer ? 'Open table' : 'Kick Bot & Approve');
     $('#host-join-notice').prop('hidden', false);
     if (!isViewer) {
         $('#table-admin-btn').addClass('has-join-requests')
@@ -1183,7 +1579,7 @@ function showNextPendingRequestNotice() {
     if (!request) return;
     const message = pending.length > 1
         ? `${request.name || 'A player'} and ${pending.length - 1} more player request(s) need approval.`
-        : `${request.name || 'A player'} is waiting for approval to join.`;
+        : `${request.name || 'A player'} is waiting to replace a bot.`;
     $('#host-join-notice-text').text(message);
     $('#host-join-notice-open').text('Review request');
     $('#host-join-notice').prop('hidden', false);
@@ -1224,6 +1620,46 @@ async function enableHostNotifications() {
     }
 }
 
+async function acceptGuestIntoSeat(uid, seatIndex) {
+    const accepted = await window.rungFirebase.acceptRequest(onlineState.roomId, uid, seatIndex);
+    if (!accepted || accepted.status !== 'accepted') {
+        setStatusMessage('That bot seat is no longer available. Choose another seat.');
+        return null;
+    }
+    onlineState.pendingRequests.delete(uid);
+    onlineState.kickedBotSeats?.delete(accepted.seatIndex);
+    if (!onlineState.pendingRequests.size) {
+        $('#table-admin-btn').removeClass('has-join-requests').removeAttr('aria-label');
+    }
+    const player = gameState.players[accepted.seatIndex];
+    const oldBotName = player.name;
+    player.uid = accepted.uid;
+    player.name = accepted.name;
+    player.isHuman = true;
+    player.isBot = false;
+    onlineState.room.seats[accepted.seatIndex] = {
+        ...onlineState.room.seats[accepted.seatIndex],
+        uid: accepted.uid,
+        name: accepted.name,
+        isBot: false
+    };
+    onlineState.publishedGameKey = null;
+    renderRoomLobby(onlineState.room);
+    updateUI();
+    $('#host-join-notice').prop('hidden', true);
+    const roleLabel = accepted.seatIndex === 2 ? 'as your Partner (Seat 3)' : `in Seat ${accepted.seatIndex + 1}`;
+    const joinMsg = `${accepted.name} replaced bot ${oldBotName} ${roleLabel} and took over their cards!`;
+    setStatusMessage(joinMsg);
+    showTableAnnouncement(joinMsg, 3500);
+    if (onlineState.roomId) {
+        await publishOnlineState(true);
+        if (gameState.gameState === 'PLAYING' && gameState.currentPlayer === accepted.seatIndex) {
+            startOnlineTurnTimer();
+        }
+    }
+    return accepted;
+}
+
 async function approveRoomRequest() {
     const uid = $(this).attr('data-approve-request');
     const row = $(this).closest('.room-request-item');
@@ -1231,34 +1667,80 @@ async function approveRoomRequest() {
     if (!uid || !Number.isInteger(seatIndex)) return;
     $(this).prop('disabled', true).text('Approving…');
     try {
-        const accepted = await window.rungFirebase.acceptRequest(onlineState.roomId, uid, seatIndex);
-        if (!accepted || accepted.status !== 'accepted') {
-            setStatusMessage('That bot seat is no longer available. Choose another seat.');
-            return;
-        }
-        onlineState.pendingRequests.delete(uid);
-        if (!onlineState.pendingRequests.size) {
-            $('#table-admin-btn').removeClass('has-join-requests').removeAttr('aria-label');
-        }
-        const player = gameState.players[accepted.seatIndex];
-        player.uid = accepted.uid;
-        player.name = accepted.name;
-        player.isHuman = true;
-        player.isBot = false;
-        onlineState.room.seats[accepted.seatIndex] = {
-            ...onlineState.room.seats[accepted.seatIndex],
-            uid: accepted.uid,
-            name: accepted.name,
-            isBot: false
-        };
-        renderRoomLobby(onlineState.room);
-        updateUI();
-        $('#host-join-notice').prop('hidden', true);
-        if (onlineState.hasStarted) await publishOnlineState(true);
+        await acceptGuestIntoSeat(uid, seatIndex);
     } catch (error) {
         console.error('Approving the player request failed:', error);
         setStatusMessage(error.message || 'The guest could not be approved.');
-        $(this).prop('disabled', false).text('Approve');
+        $(this).prop('disabled', false).text('Kick Bot & Approve');
+    }
+}
+
+async function kickBotForFriend(seatIndex) {
+    if (!Number.isInteger(seatIndex) || seatIndex < 1 || seatIndex > 3) return;
+    if (!onlineState.roomId || !onlineState.isHost) {
+        // If playing offline solo game, automatically upgrade to a live online host room so a friend can join mid-game!
+        try {
+            setStatusMessage('Opening live table so your friend can replace this bot and continue the game…');
+            const firebase = await firebaseApi();
+            const room = await firebase.createRoom(currentPlayerName(), 'public', gameState.scoringMode);
+            const savedCards = gameState.players.map(p => [...p.cards]);
+            const savedTricks = gameState.players.map(p => p.tricks);
+            configureHostRoom(room);
+            gameState.players.forEach((p, idx) => {
+                p.cards = savedCards[idx];
+                p.tricks = savedTricks[idx];
+            });
+            onlineState.hasStarted = true;
+            onlineState.dealCompleted = gameState.gameState === 'PLAYING';
+            onlineState.gameId = `${room.id}-${Date.now()}`;
+            onlineState.kickedBotSeats.add(seatIndex);
+            await publishOnlineState(true);
+            showGameScreen();
+            showRoomLobby(onlineState.room);
+            const code = room.tableCode || room.inviteCode || '';
+            if (code && navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(code).catch(() => {});
+            }
+            const msg = `Bot in Seat ${seatIndex + 1}${seatIndex === 2 ? ' (Your Partner)' : ''} kicked out! Share Table ID ${code} — your friend will automatically take this seat and cards.`;
+            $('#room-lobby-status').removeClass('is-error').text(msg);
+            setStatusMessage(msg);
+            return;
+        } catch (error) {
+            console.error('Upgrading solo game to live room for friend failed:', error);
+            setStatusMessage('Could not create live room for friend: ' + (error.message || 'Check connection'));
+            return;
+        }
+    }
+    // Check if there is already a pending player request waiting!
+    const pendingEntries = [...onlineState.pendingRequests.entries()].filter(([, req]) => req.role !== 'viewer');
+    if (pendingEntries.length > 0) {
+        const [firstUid] = pendingEntries[0];
+        await acceptGuestIntoSeat(firstUid, seatIndex);
+        return;
+    }
+    onlineState.kickedBotSeats.add(seatIndex);
+    const code = onlineState.room?.tableCode || onlineState.room?.inviteCode || '';
+    if (code && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(code).catch(() => {});
+    }
+    renderRoomLobby(onlineState.room);
+    updateUI();
+    const roleDesc = seatIndex === 2 ? 'Partner Seat 3' : `Seat ${seatIndex + 1}`;
+    const statusText = `Bot kicked from ${roleDesc}! Table ID ${code} copied — when your friend joins with ${code}, they will immediately take ${roleDesc} and continue the game.`;
+    $('#room-lobby-status').removeClass('is-error').text(statusText);
+    setStatusMessage(statusText);
+    showTableAnnouncement(`Bot kicked from ${roleDesc} · Ready for friend (Table ID: ${code})`, 3600);
+}
+
+function kickHumanPlayerToBot(seatIndex) {
+    if (!onlineState.isHost || !Number.isInteger(seatIndex) || seatIndex < 1 || seatIndex > 3) return;
+    const player = gameState.players[seatIndex];
+    if (!player || player.isBot) return;
+    replacePlayerWithBot(player);
+    renderRoomLobby(onlineState.room);
+    updateUI();
+    if (gameState.gameState === 'PLAYING' && gameState.currentPlayer === seatIndex) {
+        startTurn();
     }
 }
 
@@ -1326,9 +1808,18 @@ function showGameScreen() {
         .attr('title', voiceSupported
             ? 'Join the table voice chat'
             : 'Microphone and WebRTC are not supported by this browser or connection');
-    $('#new-game-btn, #play-again-btn').prop('disabled', onlineState.isReplica);
+    $('#new-game-btn').prop('disabled', onlineState.isReplica);
+    $('#play-again-btn').prop('disabled', onlineState.isReplica && onlineState.isViewer);
     $('#table-admin-btn').prop('hidden', !onlineState.isHost);
-    if (onlineState.isViewer) $('#current-player').text('Watching as viewer');
+    const hasBots = gameState.players.slice(1).some(p => p.isBot);
+    $('#top-kick-bot-btn').prop('hidden', !(onlineState.isHost || !onlineState.roomId) || !hasBots);
+    const tableCode = onlineState.room?.tableCode || onlineState.room?.inviteCode || '';
+    $('#live-table-badge')
+        .prop('hidden', !tableCode)
+        .text(tableCode ? `Table ID: ${tableCode} 📋` : '');
+    const viewerCanTakeBot = onlineState.isViewer && Boolean(onlineState.room?.seats?.some(s => s.isBot));
+    $('#viewer-take-seat-btn').prop('hidden', !viewerCanTakeBot);
+    if (onlineState.isViewer) $('#current-player').text('Watching Live Game');
 }
 
 function prepareNewGame() {
@@ -1489,13 +1980,45 @@ async function processOnlineAction(actionSnapshot) {
             resolveChoice(action.trumpSuit);
             return;
         }
+        if (action.kind === 'reaction') {
+            const isViewerReaction = action.seatIndex === -1 || action.seatIndex === null;
+            const player = !isViewerReaction ? gameState.players[action.seatIndex] : null;
+            const text = String(action.reaction || '').trim().slice(0, 80);
+            if (!text || (!isViewerReaction && (!player || player.uid !== action.uid))) {
+                await firebase.markActionProcessed(actionSnapshot.ref);
+                return;
+            }
+            if (text === '__REMATCH__' && !isViewerReaction && gameState.gameState === 'GAME_END') {
+                await firebase.markActionProcessed(actionSnapshot.ref);
+                if (prepareNewGame()) {
+                    rulesAreOpen = false;
+                    $('#celebration').hide();
+                    await initializeGame();
+                    onlineState.hasStarted = true;
+                    updateUI();
+                    startOnlineTurnTimer();
+                }
+                return;
+            }
+            const entry = {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                playerId: player ? player.id : 1,
+                playerName: player ? player.name : (action.senderName || 'Viewer'),
+                text
+            };
+            gameState.lastReaction = entry;
+            renderIncomingReaction(entry);
+            await firebase.markActionProcessed(actionSnapshot.ref);
+            await publishOnlineState(true);
+            return;
+        }
         if (!onlineState.hasStarted || action.kind !== 'card') {
             await firebase.markActionProcessed(actionSnapshot.ref);
             return;
         }
         const player = gameState.players[action.seatIndex];
         const card = action.card;
-        if (!player || player.uid !== action.uid || gameState.currentPlayer !== action.seatIndex ||
+        if (gameState.trickCards.length >= 4 || !player || player.uid !== action.uid || gameState.currentPlayer !== action.seatIndex ||
             !player.cards.some(item => item.rank === card.rank && item.suit === card.suit) ||
             !isValidPlay(card, player)) {
             await firebase.markActionProcessed(actionSnapshot.ref);
@@ -1513,9 +2036,15 @@ async function processOnlineAction(actionSnapshot) {
 function publicGameState() {
     return {
         gameState: gameState.gameState,
+        scoringMode: gameState.scoringMode || 'classic_3_2',
         currentPlayer: gameState.currentPlayer,
         trumpSuit: gameState.trumpSuit,
         ledSuit: gameState.ledSuit,
+        tableCards: gameState.tableCards.map(item => ({
+            player: item.player || 1,
+            card: { suit: item.card ? item.card.suit : item.suit, rank: item.card ? item.card.rank : item.rank },
+            sequence: item.sequence || 1
+        })),
         trickCards: gameState.trickCards.map(item => ({
             player: item.player,
             card: { suit: item.card.suit, rank: item.card.rank },
@@ -1541,6 +2070,7 @@ function publicGameState() {
         lastPlayedPlayerId: gameState.lastPlayedPlayerId,
         botBanter: gameState.botBanter,
         botBanterLog: gameState.botBanterLog,
+        lastReaction: gameState.lastReaction,
         playSeqCounter: gameState.playSeqCounter,
         players: gameState.players.map(player => ({
             id: player.id,
@@ -1560,11 +2090,22 @@ function publicGameState() {
 }
 
 function applyPublicGameState(state, seats) {
-    if (!onlineState.isReplica || !state) return;
+    if (!onlineState.isReplica || !state || !Array.isArray(state.players) ||
+        !Array.isArray(seats) || seats.length !== 4) return;
+    const myUid = window.rungFirebase?.user?.uid;
+    const mySeatedIdx = myUid ? seats.findIndex(s => s && s.uid === myUid && !s.isBot) : -1;
+    if (!onlineState.isHost && mySeatedIdx >= 0) {
+        onlineState.seatIndex = mySeatedIdx;
+        onlineState.isViewer = false;
+    }
     gameState.gameState = state.gameState;
+    if (state.scoringMode && SCORING_MODES.includes(state.scoringMode)) {
+        gameState.scoringMode = state.scoringMode;
+    }
     gameState.currentPlayer = state.currentPlayer;
     gameState.trumpSuit = state.trumpSuit;
     gameState.ledSuit = state.ledSuit;
+    gameState.tableCards = Array.isArray(state.tableCards) ? state.tableCards : [];
     gameState.trickCards = state.trickCards || [];
     gameState.trumpChooserId = state.trumpChooserId || gameState.trumpChooserId;
     onlineState.gameId = state.gameId || onlineState.gameId;
@@ -1590,6 +2131,7 @@ function applyPublicGameState(state, seats) {
         const player = gameState.players[index];
         if (!player) return;
         const seat = seats[index];
+        if (!seat) return;
         player.uid = seat.uid || null;
         player.name = seat.name;
         player.team = seat.team;
@@ -1597,23 +2139,45 @@ function applyPublicGameState(state, seats) {
         player.isHuman = !onlineState.isViewer && index === onlineState.seatIndex;
         if (index !== onlineState.seatIndex) {
             player.cards = Array.from({ length: shared.cardCount }, () => ({ suit: 'hidden', rank: 'hidden' }));
+        } else {
+            player.cards = (player.cards || []).filter(c => c && c.suit && c.suit !== 'hidden');
+            if (player.cards.length === 0 && shared.cardCount > 0 && onlineState.roomId && myUid) {
+                window.rungFirebase?.getPrivateHand?.(onlineState.roomId, myUid).then(hand => {
+                    if (hand) acceptPrivateHand(hand);
+                }).catch(() => {});
+            }
         }
         player.tricks = shared.tricks || 0;
     });
     gameState.lastPlayInfoByPlayer = state.lastPlays || { 1: null, 2: null, 3: null, 4: null };
+    [1, 2, 3, 4].forEach(pid => {
+        const info = gameState.lastPlayInfoByPlayer[pid];
+        if (info && info.card) {
+            gameState.lastPlayedByPlayer[pid] = [info.card];
+        }
+    });
     gameState.botBanter = state.botBanter || null;
     if (state.botBanter && state.botBanter.id !== onlineState.lastBotBanterId) {
         renderPunjabiBanter(state.botBanter);
     }
+    gameState.lastReaction = state.lastReaction || null;
+    if (state.lastReaction && state.lastReaction.id !== onlineState.lastReactionId) {
+        renderIncomingReaction(state.lastReaction);
+    }
     updateUI();
     renderReplicaTrick();
+    if (!onlineState.isViewer && state.currentPlayer === onlineState.seatIndex) {
+        onlineState.pendingAction = false;
+    }
     if (state.gameState === 'TRUMP_SELECTION') {
         const chooser = gameState.players.find(player => player.id === state.trumpChooserId);
         setStatusMessage(`${chooser?.name || 'Player'} is choosing trump…`);
         showRemoteTrumpPrompt();
     } else {
         onlineState.activeTrumpPrompt = false;
-        onlineState.pendingAction = false;
+        if (state.currentPlayer !== onlineState.seatIndex) {
+            onlineState.pendingAction = false;
+        }
         closeTrumpSelection();
         $('#trump-selection .trump-btn').prop('disabled', false);
         setStatusMessage(onlineState.isViewer
@@ -1628,26 +2192,44 @@ function acceptPublicGameState(state, seats) {
     applyPublicGameState(state, seats);
     if (state.gameState === 'GAME_END' && !$('#celebration').is(':visible')) {
         endGame();
+    } else if (state.gameState && state.gameState !== 'GAME_END' && !rulesAreOpen) {
+        $('#celebration').hide();
     }
 }
 
 function renderReplicaTrick() {
     $('.trick-area .played-card').remove();
-    gameState.trickCards.forEach((trick, index) => {
+    const stackedCards = (gameState.tableCards || []).map((item, idx) => ({
+        player: item.player || ((idx % 4) + 1),
+        card: item.card || { suit: item.suit, rank: item.rank },
+        sequence: item.sequence || ((idx % 4) + 1),
+        isStacked: true
+    }));
+    const activeCards = (gameState.trickCards || []).map((item, idx) => ({
+        player: item.player,
+        card: item.card,
+        sequence: item.sequence || (idx + 1),
+        isStacked: false
+    }));
+    const allTableCards = [...stackedCards, ...activeCards];
+    allTableCards.forEach((trick, index) => {
         const card = createCardElement(trick.card, false)
             .addClass('played-card')
+            .toggleClass('stacked-table-card', Boolean(trick.isStacked))
             .attr('data-player-id', trick.player)
             .attr('data-play-number', trick.sequence || index + 1);
-        if (index === gameState.trickCards.length - 1) card.addClass('last-played-card');
-        card.append($('<span class="play-sequence"></span>').text(trick.sequence || index + 1));
-        const seat = Number(trick.player);
-        const placement = {
-            1: 'translate(-50%, -50%) rotate(0deg)',
-            2: 'translate(-50%, -50%) rotate(90deg)',
-            3: 'translate(-50%, -50%) rotate(180deg)',
-            4: 'translate(-50%, -50%) rotate(270deg)'
-        }[seat];
-        const inward = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--card-height')) * 0.4;
+        if (!trick.isStacked && index === allTableCards.length - 1) {
+            card.addClass('last-played-card');
+        }
+        const seat = getDisplaySeatIndex(Number(trick.player) - 1) + 1;
+        const rotDeg = { 1: 0, 2: 90, 3: 180, 4: 270 }[seat] || 0;
+        card.append(
+            $('<span class="play-sequence"></span>')
+                .text(trick.sequence || index + 1)
+                .css('transform', `rotate(${-rotDeg}deg)`)
+        );
+        const placement = `translate(-50%, -50%) rotate(${rotDeg}deg)`;
+        const inward = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--card-height')) * 0.46;
         const offsets = { 1: [0, inward], 2: [-inward, 0], 3: [0, -inward], 4: [inward, 0] };
         card.css({
             position: 'absolute',
@@ -1662,7 +2244,14 @@ function renderReplicaTrick() {
 
 function acceptPrivateHand(hand) {
     if (!onlineState.isReplica || !Number.isInteger(onlineState.seatIndex)) return;
-    gameState.players[onlineState.seatIndex].cards = hand.cards || [];
+    onlineState.isViewer = false;
+    onlineState.pendingAction = false;
+    const localPlayer = gameState.players[onlineState.seatIndex];
+    if (localPlayer) {
+        localPlayer.cards = Array.isArray(hand?.cards) ? hand.cards : [];
+        localPlayer.isHuman = true;
+        localPlayer.isBot = false;
+    }
     updateUI();
     renderReplicaTrick();
 }
@@ -1708,7 +2297,7 @@ function publishOnlineState(force = false) {
         isBot: player.isBot
     }));
     const key = JSON.stringify({ state, seats });
-    if (key === onlineState.publishedGameKey) return;
+    if (!force && key === onlineState.publishedGameKey) return Promise.resolve();
     onlineState.publishedGameKey = key;
     onlineState.room.seats = seats;
     const work = async () => {
@@ -1749,7 +2338,8 @@ function publishOnlineState(force = false) {
                 botBanter: gameState.botBanter,
                 botBanterLog: gameState.botBanterLog,
                 initialLeadTeam: gameState.initialLeadTeam,
-                leadHolderPlayerId: gameState.leadHolderPlayerId
+                leadHolderPlayerId: gameState.leadHolderPlayerId,
+                scoringMode: gameState.scoringMode || 'classic_3_2'
             })),
             gameId: onlineState.gameId,
             dealCompleted: onlineState.dealCompleted
@@ -1757,6 +2347,7 @@ function publishOnlineState(force = false) {
         await Promise.all([
             window.rungFirebase.publishRoom(onlineState.roomId, {
                 status: gameState.gameState === 'GAME_END' ? 'COMPLETED' : 'PLAYING',
+                scoringMode: gameState.scoringMode || 'classic_3_2',
                 seats,
                 memberUids: [...new Set([
                     ...seats.filter(seat => seat.uid).map(seat => seat.uid),
@@ -1947,6 +2538,8 @@ async function toggleVoice() {
 // Make initializeGame async so we can await the animated deal
 async function initializeGame() {
 	try {
+        rulesAreOpen = false;
+        $('#celebration').hide();
         onlineState.dealCompleted = false;
         onlineState.activeTrumpPrompt = false;
         $('#bot-banter-log').html('<p class="bot-banter-empty">Bot banter will appear here during the game.</p>');
@@ -1969,9 +2562,7 @@ async function initializeGame() {
 		});
 		gameState.currentPlayer = 0;
 		gameState.trumpSuit = null;
-        gameState.trumpChooserId = onlineState.roomId
-            ? gameState.nextTrumpChooserId || 1
-            : 1;
+        gameState.trumpChooserId = gameState.nextTrumpChooserId || 1;
 		gameState.ledSuit = null;
 		gameState.trickCards = [];
 		gameState.trickWinner = null;
@@ -1986,7 +2577,7 @@ async function initializeGame() {
 		gameState.handIndex = 0;
 		gameState.handWinners = [];
 		gameState.stackedPoints = 0;
-		gameState.currentStake = 1;
+		gameState.currentStake = gameState.scoringMode === 'two_plus' ? 2 : 1;
 		gameState.consecutiveWins = 0;
 		gameState.totalHandsPlayed = 0;
 		gameState.lastHandWinnerId = null;
@@ -2012,7 +2603,8 @@ async function initializeGame() {
 		gameState.initialLeadTeam = null;
 		gameState.currentChallengeTeam = null;
 		gameState.leadHolderPlayerId = null;
-		gameState.stake1Completed = false;
+		gameState.stake1Completed = gameState.scoringMode === 'two_plus';
+		setScoringMode(gameState.scoringMode);
 
 		// Create and shuffle deck
 		createDeck();
@@ -2239,33 +2831,56 @@ function chooseTrumpSuit(player) {
 
 // Update UI
 function updateUI() {
-    // Update player cards with fan layout
-    for (let i = 0; i < 4; i++) {
-        const player = gameState.players[i];
-        const cardArea = $(`#player${i+1}-cards`);
+    const localSeatIndex = getLocalPerspectiveSeatIndex();
+    const localTeam = gameState.players[localSeatIndex]?.team || 1;
+    const opposingTeam = localTeam === 1 ? 2 : 1;
+    const localTeamPlayers = gameState.players.filter(player => player.team === localTeam);
+    const opposingTeamPlayers = gameState.players.filter(player => player.team === opposingTeam);
+    $('#team1-label').text(`Team 1 (${localTeamPlayers.map(player => player.name).join(' & ')})`);
+    $('#team2-label').text(`Team 2 (${opposingTeamPlayers.map(player => player.name).join(' & ')})`);
+
+    // Render the local seat at the bottom and preserve the table's anti-clockwise order.
+    for (let displaySlot = 0; displaySlot < 4; displaySlot++) {
+        const playerIndex = getCanonicalSeatIndex(displaySlot);
+        const player = gameState.players[playerIndex];
+        const cardArea = $(`#player${displaySlot + 1}-cards`);
         cardArea.empty();
         const playerArea = cardArea.closest('.player-area');
-        const isLocalSeat = onlineState.mode === 'host'
-            ? i === 0
-            : onlineState.isReplica
-                ? !onlineState.isViewer && i === onlineState.seatIndex
-                : i === 0;
-        playerArea.find('.player-name').text(
-            `${player.name}${isLocalSeat ? ' (You)' : ''} (Team ${player.team})`
-        );
-        playerArea.toggleClass('is-current-turn', gameState.gameState === "PLAYING" && i === gameState.currentPlayer);
+        const isLocalSeat = !onlineState.isViewer && playerIndex === localSeatIndex;
+        const displayTeam = getDisplayTeamNumber(player.team);
+        const needsYouTag = isLocalSeat && !/^you$/i.test(String(player.name || '').trim());
+        const isSeniorLeadHolder = gameState.stackedPoints > 0 && player.id === gameState.leadHolderPlayerId;
+        const isTrickLeader = gameState.trickCards.length > 0 && gameState.trickCards[0].player === player.id;
+        const isLeadingHandUser = isSeniorLeadHolder || isTrickLeader;
+        const isCurrentTurn = gameState.gameState === "PLAYING" && playerIndex === gameState.currentPlayer;
+        const nameEl = playerArea.find('.player-name').empty();
+        nameEl.append(document.createTextNode(
+            `${player.name}${needsYouTag ? ' (You)' : ''} (Team ${displayTeam})${isSeniorLeadHolder ? ' 👑 Lead' : (isTrickLeader ? ' 🎯 Lead' : '')}`
+        ));
+        if (player.isBot && playerIndex > 0 && (onlineState.isHost || !onlineState.roomId)) {
+            const isKickedReady = onlineState.kickedBotSeats?.has(playerIndex);
+            const kickBtn = $('<button type="button" class="inline-kick-bot-btn"></button>')
+                .attr('data-kick-bot-seat', playerIndex)
+                .attr('title', playerIndex === 2
+                    ? 'Kick out bot and let your friend join as your partner'
+                    : 'Kick out bot and let a friend take this seat')
+                .text(isKickedReady ? 'Seat Open 📋' : (playerIndex === 2 ? 'Kick Bot (Partner)' : 'Kick Bot'));
+            nameEl.append(' ').append(kickBtn);
+        }
+        playerArea.toggleClass('is-current-turn', isCurrentTurn);
+        playerArea.toggleClass('is-lead-holder', isLeadingHandUser);
+        playerArea.toggleClass('is-senior-lead', isSeniorLeadHolder);
         playerArea.toggleClass('last-played-player', player.id === gameState.lastPlayedPlayerId);
+        const cornerHistoryPanel = $(`#player${displaySlot + 1}-history`);
+        cornerHistoryPanel.toggleClass('is-lead-holder', isLeadingHandUser);
+        cornerHistoryPanel.toggleClass('is-current-turn', isCurrentTurn);
         
-        const shouldShowCards = onlineState.mode === 'host'
-            ? i === 0
-            : onlineState.isReplica
-                ? !onlineState.isViewer && i === onlineState.seatIndex
-                : player.isHuman;
+        const shouldShowCards = !onlineState.isViewer && playerIndex === localSeatIndex;
         if (shouldShowCards) {
-            positionCardsInFan(player.cards, i, cardArea);
+            positionCardsInFan(player.cards, displaySlot, cardArea);
         } else {
             // Show card backs for AI players
-            positionCardBacksInFan(player.cards.length, i, cardArea);
+            positionCardBacksInFan(player.cards.length, displaySlot, cardArea);
         }
         
         // removed card-count indicator - it overlapped cards on small screens and was redundant
@@ -2291,14 +2906,24 @@ function updateUI() {
         ledSuitIndicator.html('');
     }
     
-    // Update table cards count
-    $('#table-cards-count').text(`Cards on table: ${gameState.tableCards.length}`);
+    // Update table cards count & senior lead holder / hype stack info
+    const totalCardsOnTable = gameState.tableCards.length + gameState.trickCards.length;
+    const leadHolder = gameState.stackedPoints > 0
+        ? gameState.players.find(p => p.id === gameState.leadHolderPlayerId)
+        : null;
+    const hypePrefix = gameState.stackedPoints >= 3 ? '🔥 ' : '';
+    const leadInfo = leadHolder ? ` · ${hypePrefix}Stack: ${gameState.stackedPoints} pts (Lead: ${leadHolder.name})` : '';
+    $('#table-cards-count').text(`Cards on table: ${totalCardsOnTable}${leadInfo}`);
     
     // Update scores
-    $('#team1-points').text(gameState.team1Points);
-    $('#team2-points').text(gameState.team2Points);
-    $('#team1-consecutive').text(gameState.team1Consecutive);
-    $('#team2-consecutive').text(gameState.team2Consecutive);
+    const localPoints = localTeam === 1 ? gameState.team1Points : gameState.team2Points;
+    const opposingPoints = localTeam === 1 ? gameState.team2Points : gameState.team1Points;
+    const localConsecutive = localTeam === 1 ? gameState.team1Consecutive : gameState.team2Consecutive;
+    const opposingConsecutive = localTeam === 1 ? gameState.team2Consecutive : gameState.team1Consecutive;
+    $('#team1-points').text(localPoints);
+    $('#team2-points').text(opposingPoints);
+    $('#team1-consecutive').text(localConsecutive);
+    $('#team2-consecutive').text(opposingConsecutive);
     
     // Update stacked points
     $('#stacked-points').text(gameState.stackedPoints);
@@ -2311,13 +2936,31 @@ function updateUI() {
     $('#current-player').text(`Current: ${currentPlayerName}`);
     
     // Update cards remaining
-    const localSeat = onlineState.isReplica ? onlineState.seatIndex : 0;
-    const humanCards = Number.isInteger(localSeat) ? gameState.players[localSeat].cards.length : 0;
+    const humanCards = onlineState.isViewer ? 0 : gameState.players[localSeatIndex].cards.length;
     $('#cards-remaining').text(`Cards in hand: ${humanCards}`);
     
-    // Update stake display
-    $('#stake-display').text(gameState.currentStake);
-    $('#current-stake').text(`Stake ${gameState.currentStake} (${gameState.currentStake === 1 ? '3 consecutive wins' : '2 consecutive wins'})`);
+    // Update stake display and top-bar live controls
+    const mode = gameState.scoringMode || 'classic_3_2';
+    if (mode === 'single_hand') {
+        $('#stake-display').text('1 Pt/Hand');
+        $('#current-stake').text('Rule: Single Hand Winner = 1 Point');
+    } else if (mode === 'two_plus') {
+        $('#stake-display').text('2+ Hands');
+        $('#current-stake').text('Rule: 2 or 2+ Hands Winner Wins Points');
+    } else {
+        $('#stake-display').text(gameState.currentStake);
+        $('#current-stake').text(
+            `Stake ${gameState.currentStake} (${gameState.currentStake === 1 ? '1st 3 Hands = 3 Pts, then 2+ Hands' : '2 or 2+ Hands Winner Wins Points'})`
+        );
+    }
+    const hasBots = gameState.players.slice(1).some(p => p.isBot);
+    $('#top-kick-bot-btn').prop('hidden', !(onlineState.isHost || !onlineState.roomId) || !hasBots);
+    const tableCode = onlineState.room?.tableCode || onlineState.room?.inviteCode || '';
+    $('#live-table-badge')
+        .prop('hidden', !tableCode)
+        .text(tableCode ? `Table ID: ${tableCode} 📋` : '');
+    const viewerCanTakeBot = onlineState.isViewer && Boolean(onlineState.room?.seats?.some(s => s.isBot));
+    $('#viewer-take-seat-btn').prop('hidden', !viewerCanTakeBot);
     
     // Ensure game-table and trick area use relative positioning for correct absolute placement
     $('.game-table').css('position', 'relative');
@@ -2367,21 +3010,22 @@ function ensurePlayerHistoryUI() {
 
 // Render history into a dedicated panel. Most recent first. Defensive about missing data.
 function renderPlayerHistory(playerId) {
-	const panel = $(`#player${playerId}-history`);
+	const displaySlot = getDisplaySeatIndex(playerId - 1) + 1;
+	const panel = $(`#player${displaySlot}-history`);
 	if (!panel.length) return;
 
 	panel.empty();
 
 	const arr = gameState.lastPlayedByPlayer[playerId] || [];
-	if (!arr.length) {
+	const lastPlay = gameState.lastPlayInfoByPlayer[playerId];
+	const card = arr[arr.length - 1] || lastPlay?.card;
+	if (!card) {
 		panel.append($('<div class="history-empty">—</div>'));
 		return;
 	}
 
-	const card = arr[arr.length - 1];
 	const suitSymbol = SUIT_SYMBOLS[card.suit] || '';
 	const colorClass = (card.suit === 'hearts' || card.suit === 'diamonds') ? 'suit-red' : 'suit-black';
-	const lastPlay = gameState.lastPlayInfoByPlayer[playerId];
 	const playNumber = lastPlay ? lastPlay.playNumber : '–';
 	const item = $('<div class="mini-play"></div>');
 	item.attr('title', `Last play #${playNumber}: ${card.rank} ${card.suit}`);
@@ -2404,21 +3048,52 @@ function renderCustomEmojis() {
 	});
 }
 
+function showTableAnnouncement(text, durationMs = 3000) {
+	// Middle-of-screen short popup disabled per user request; corner play boxes and leading tracing border show live state.
+	const announcement = $('#table-announcement');
+	if (announcement.length) {
+		announcement.removeClass('is-visible').prop('hidden', true);
+	}
+}
+
+function renderIncomingReaction(entry) {
+	if (!entry || entry.id === onlineState.lastReactionId) return;
+	onlineState.lastReactionId = entry.id;
+	showPlayerReaction(entry.playerId, entry.text);
+	const isLocal = entry.playerId === getLocalPerspectiveSeatIndex() + 1;
+	showTableAnnouncement(`${isLocal ? 'You' : (entry.playerName || 'Player')}: ${entry.text}`, 3000);
+}
+
 function broadcastReaction(message) {
-	const reaction = String(message || '').trim();
+	const reaction = String(message || '').trim().slice(0, 80);
 	if (!reaction) return;
 
-	showPlayerReaction(1, reaction);
-	const announcement = $('#table-announcement');
-	announcement.text(`You: ${reaction}`).addClass('is-visible');
-	clearTimeout(gameState.announcementTimer);
-	gameState.announcementTimer = setTimeout(() => announcement.removeClass('is-visible'), 3000);
+	const localPlayerId = getLocalPerspectiveSeatIndex() + 1;
+	const localPlayer = gameState.players[localPlayerId - 1];
+	const entry = {
+		id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		playerId: localPlayerId,
+		playerName: localPlayer?.name || 'You',
+		text: reaction
+	};
+	renderIncomingReaction(entry);
 	closeReactionPicker();
+
+	if (onlineState.isHost && onlineState.roomId) {
+		gameState.lastReaction = entry;
+		publishOnlineState(true);
+	} else if (onlineState.isReplica && onlineState.roomId) {
+		const seatIdx = onlineState.isViewer ? -1 : onlineState.seatIndex;
+		firebaseApi().then(firebase =>
+			firebase.submitAction(onlineState.roomId, seatIdx, reaction, 'reaction', currentPlayerName())
+		).catch(error => console.error('Sending reaction failed:', error));
+	}
 }
 
 function showPlayerReaction(playerId, reaction) {
 	const player = gameState.players.find(item => item.id === playerId);
-	const playerArea = $(`#player${playerId}-cards`).closest('.player-area');
+	const displaySlot = getDisplaySeatIndex(playerId - 1) + 1;
+	const playerArea = $(`#player${displaySlot}-cards`).closest('.player-area');
 	if (!player || !playerArea.length) return;
 
 	playerArea.find('.player-reaction').remove();
@@ -2588,7 +3263,9 @@ function createCardElement(card, isClickable) {
 }
 
 function handleCardClick(card) {
+    if (gameState.trickCards.length >= 4) return;
     const currentPlayer = gameState.players[gameState.currentPlayer];
+    if (!currentPlayer) return;
     if (onlineState.isReplica) {
         if (onlineState.isViewer || onlineState.pendingAction ||
             gameState.gameState !== 'PLAYING' || gameState.currentPlayer !== onlineState.seatIndex) return;
@@ -2597,25 +3274,39 @@ function handleCardClick(card) {
             return;
         }
         onlineState.pendingAction = true;
-        setStatusMessage('Sending your card…');
+        // Optimistic 0ms UI update so card play feels instant on Apple/mobile & desktop devices
+        const cardIdx = currentPlayer.cards.findIndex(c => c.suit === card.suit && c.rank === card.rank);
+        const removedCard = cardIdx !== -1 ? currentPlayer.cards.splice(cardIdx, 1)[0] : null;
+        gameState.trickCards.push({
+            card: { suit: card.suit, rank: card.rank },
+            player: currentPlayer.id,
+            sequence: gameState.trickCards.length + 1
+        });
+        if (gameState.trickCards.length === 1) {
+            gameState.ledSuit = card.suit;
+        }
+        gameState.currentPlayer = (gameState.currentPlayer + 3) % 4;
+        gameState.lastPlayedPlayerId = currentPlayer.id;
+        updateUI();
+        renderReplicaTrick();
+        const nextPlayerName = gameState.players[gameState.currentPlayer]?.name || 'Next player';
+        setStatusMessage(`${nextPlayerName} is playing…`);
+
         firebaseApi().then(firebase =>
             firebase.submitAction(onlineState.roomId, onlineState.seatIndex, card)
         ).catch(error => {
             console.error('Submitting your card failed:', error);
+            if (removedCard) currentPlayer.cards.push(removedCard);
+            gameState.currentPlayer = onlineState.seatIndex;
             onlineState.pendingAction = false;
+            updateUI();
+            renderReplicaTrick();
             setStatusMessage('Your card could not be sent. Please try again.');
         });
         return;
     }
     
-    if (gameState.gameState === "TRUMP_SELECTION" && currentPlayer.isHuman) {
-        // Human selecting trump
-        gameState.trumpSuit = card.suit;
-        gameState.gameState = "PLAYING";
-        gameState.currentPlayer = 0; // Human player goes first
-        setStatusMessage("Your turn - play a card");
-        updateUI();
-    } else if (gameState.gameState === "PLAYING" && currentPlayer.isHuman) {
+    if (gameState.gameState === "PLAYING" && currentPlayer.isHuman) {
         // Human playing a card
         if (isValidPlay(card, currentPlayer)) {
             playCard(card, currentPlayer);
@@ -2640,6 +3331,10 @@ function isValidPlay(card, player) {
 
 function playCard(card, player) {
     try {
+        if (gameState.trickCards.length >= 4) {
+            console.warn('playCard: trick already has 4 cards, waiting for determineHandWinner');
+            return;
+        }
         clearTimeout(onlineState.turnTimer);
         onlineState.turnTimer = null;
         onlineState.turnTimerKey = null;
@@ -2696,7 +3391,7 @@ function playCard(card, player) {
 
         // If all players have played, determine hand winner
         if (gameState.trickCards.length === 4) {
-            setTimeout(determineHandWinner, 1000);
+            setTimeout(determineHandWinner, 650);
         } else {
             startTurn();
         }
@@ -2705,8 +3400,9 @@ function playCard(card, player) {
     }
 }
 
-function displayPlayedCard(card, playerId) {
+function displayPlayedCard(card, playerOrId) {
     try {
+        const playerId = (typeof playerOrId === 'object' && playerOrId !== null) ? playerOrId.id : playerOrId;
         const sequence = gameState.trickCards.length;
         // record and render per-player history (chronological)
         if (typeof addToPlayerHistory === 'function') {
@@ -2732,14 +3428,9 @@ function displayPlayedCard(card, playerId) {
         gameState.playSeqCounter = (gameState.playSeqCounter || 0) + 1;
         gameState.playCountByPlayer[playerId] = (gameState.playCountByPlayer[playerId] || 0) + 1;
 
-        const positions = {
-            1: 'bottom',
-            2: 'left',
-            3: 'top',
-            4: 'right'
-        };
-
-        const position = positions[playerId] || 'bottom';
+        const displaySeat = getDisplaySeatIndex(playerId - 1) + 1;
+        const positions = { 1: 'bottom', 2: 'left', 3: 'top', 4: 'right' };
+        const position = positions[displaySeat] || 'bottom';
         $('.trick-area .played-card.last-played-card').removeClass('last-played-card');
         const cardElement = createCardElement(card, false);
         cardElement.addClass('played-card last-played-card')
@@ -2747,8 +3438,6 @@ function displayPlayedCard(card, playerId) {
             .attr('data-play-number', sequence)
             .attr('aria-label', `${gameState.players.find(player => player.id === playerId).name} played ${card.rank} of ${card.suit}`)
             .attr('title', `${gameState.players.find(player => player.id === playerId).name} played ${card.rank} of ${card.suit}`);
-        cardElement.append($('<span class="play-sequence"></span>').text(sequence));
-
         // Base rotation to match fan direction
         let rotation = 0;
         switch(position) {
@@ -2765,11 +3454,16 @@ function displayPlayedCard(card, playerId) {
                 rotation = 270;
                 break;
         }
+        cardElement.append(
+            $('<span class="play-sequence"></span>')
+                .text(sequence)
+                .css('transform', `rotate(${-rotation}deg)`)
+        );
 
         // Keep most of each played card on its player's side of the center.
         const cardLength = parseFloat(getComputedStyle(document.documentElement)
             .getPropertyValue('--card-height')) || 120;
-        const inwardOffset = cardLength * 0.4;
+        const inwardOffset = cardLength * 0.46;
         const directionOffset = {
             bottom: { x: 0, y: inwardOffset },
             left:   { x: -inwardOffset, y: 0 },
@@ -2827,22 +3521,37 @@ function determineHandWinner() {
     const winningTeam = winningPlayer.team;
     gameState.lastHandWinnerId = winningPlayerId;
     
-    // Add all trick cards to table cards
+    // Add all trick cards to table cards (keep them on the table until a team wins the round)
     gameState.trickCards.forEach(trick => {
-        gameState.tableCards.push(trick.card);
+        gameState.tableCards.push({
+            suit: trick.card.suit,
+            rank: trick.card.rank,
+            card: { suit: trick.card.suit, rank: trick.card.rank },
+            player: trick.player,
+            sequence: trick.sequence
+        });
     });
+    $('.trick-area .played-card').addClass('stacked-table-card').removeClass('last-played-card');
     
     gameState.handsPlayed += 1;
     gameState.totalHandsPlayed += 1;
     gameState.handIndex = Math.floor(gameState.tableCards.length / 4);
     
-    // Update hand winners list
-    addHandWinner(winningPlayer.name, winningTeam);
-    
+    // Clear current trick array before handleScoring so updateUI() inside handleScoring/resetTable
+    // reports the exact number of cards remaining on the table (0 if resetTable() was triggered)
+    gameState.trickCards = [];
+    gameState.ledSuit = null;
+
     // Handle scoring based on the new rules — pass winningPlayerId so scoring knows which partner holds lead
-    handleScoring(winningTeam, winningPlayerId);
+    const scoringOutcome = handleScoring(winningTeam, winningPlayerId);
     
-    setStatusMessage(`${winningPlayer.name} (Team ${winningTeam}) wins the hand!`);
+    // Update hand winners list (after handleScoring so consecutive streak is accurate)
+    addHandWinner(winningPlayer.name, winningTeam, scoringOutcome?.wasConsecutive);
+    
+    const handWinSummary = scoringOutcome?.message ||
+        `${winningPlayer.name} (Team ${getDisplayTeamNumber(winningTeam)}) wins the hand!`;
+    setStatusMessage(handWinSummary);
+    showTableAnnouncement(handWinSummary, 2600);
     
     // Check if game is over (all cards played)
     const totalCardsRemaining = gameState.players.reduce((total, player) => total + player.cards.length, 0);
@@ -2851,57 +3560,90 @@ function determineHandWinner() {
         return;
     }
     
-    // Start new hand with winner leading
+    // Start new hand with winner leading — DO NOT clear .trick-area .played-card here!
+    // Played cards remain on the table until a team wins the round and resetTable() is called.
     gameState.currentPlayer = gameState.players.findIndex(p => p.id === winningPlayerId);
-    gameState.trickCards = [];
-    gameState.ledSuit = null;
     
     // Update UI and continue
     updateUI();
     
-    startTurn();
+    startTurn(handWinSummary);
 }
 
-// Replace handleScoring with partner-lead-aware logic
+// Replace handleScoring with multi-mode scoring support:
+// - single_hand: Single Hand Winner = 1 Point (every single hand won immediately awards 1 point)
+// - classic_3_2: Round 1 lets any team take lead on Hand 1, awards points on winning 2nd & 3rd consecutive hand (stack >= 3), clears table & starts Round 2; Round 2+ awards points on any 2 consecutive hands (no 3rd hand needed)
+// - two_plus: 2 or 2+ Hands Winner Wins Points from the start
 function handleScoring(winningTeam, winningPlayerId) {
-    // Add 1 point to the stack for this hand
-    gameState.stackedPoints += 1;
+    const mode = gameState.scoringMode || 'classic_3_2';
+    const winnerName = gameState.players.find(p => p.id === winningPlayerId)?.name || 'Player';
+    const displayTeam = getDisplayTeamNumber(winningTeam);
 
-    // If no active challenge team yet, start it and set the lead-holder as the winning player
+    // Mode 1: Single Hand Winner = 1 Point
+    if (mode === 'single_hand') {
+        if (winningTeam === 1) {
+            gameState.team1Points += 1;
+        } else {
+            gameState.team2Points += 1;
+        }
+        const wasSameTeam = gameState.currentChallengeTeam === winningTeam;
+        resetTable();
+        gameState.currentChallengeTeam = winningTeam;
+        gameState.consecutiveWins = wasSameTeam ? (gameState.consecutiveWins + 1) : 1;
+        gameState.leadHolderPlayerId = winningPlayerId;
+        gameState.team1Consecutive = winningTeam === 1 ? gameState.consecutiveWins : 0;
+        gameState.team2Consecutive = winningTeam === 2 ? gameState.consecutiveWins : 0;
+        const message = `${winnerName} (Team ${displayTeam}) wins the hand and scores +1 point! (Score: ${gameState.team1Points}-${gameState.team2Points})`;
+        setStatusMessage(message);
+        updateUI();
+        return { message, wasConsecutive: wasSameTeam };
+    }
+
+    // Add 1 point to the stack for this hand (classic_3_2 & two_plus modes)
+    gameState.stackedPoints += 1;
+    if (mode === 'two_plus') {
+        gameState.currentStake = 2;
+    }
+
+    // If no active challenge team yet (1st hand of the round), let winning team take lead
     if (gameState.currentChallengeTeam === null) {
         gameState.currentChallengeTeam = winningTeam;
         gameState.consecutiveWins = 1;
         gameState.leadHolderPlayerId = winningPlayerId;
-        // update UI counters
         gameState.team1Consecutive = (winningTeam === 1) ? 1 : 0;
         gameState.team2Consecutive = (winningTeam === 2) ? 1 : 0;
-        setStatusMessage(`Team ${winningTeam} starts the challenge! ${gameState.players.find(p=>p.id===winningPlayerId).name} holds the lead. Stack: ${gameState.stackedPoints}`);
+        const isRound2Plus = mode === 'two_plus' || gameState.currentStake === 2 || gameState.stake1Completed;
+        const targetWins = isRound2Plus ? 2 : 3;
+        const message = `${winnerName} (Team ${displayTeam}) takes the lead (Hand 1/${targetWins})! Cards stay on table · Stack: ${gameState.stackedPoints}`;
+        setStatusMessage(message);
         updateUI();
-        return;
+        return { message, wasConsecutive: false };
     }
 
     // If same team wins again
     if (winningTeam === gameState.currentChallengeTeam) {
-        // If same player as current lead-holder wins, it's a true consecutive by same leader
-        if (gameState.leadHolderPlayerId === winningPlayerId) {
-            gameState.consecutiveWins += 1;
-        } else {
-            // Partner took the lead mid-run: update lead holder and reset consecutive wins.
-            // Now the new lead-holder must win again to complete the run.
+        const isSameSeniorPlayer = (gameState.leadHolderPlayerId === winningPlayerId);
+
+        // Partner Overtake / Seniority Rule:
+        // If the partner overtook the lead (e.g. partner led Q, opponent played K, and this player won with A),
+        // this player becomes senior even over their own partner!
+        // Cards and stacked points MUST stay on the table, and this new senior player must now lead
+        // and win the next consecutive hand themselves to collect all stacked points on the table.
+        if (!isSameSeniorPlayer) {
             gameState.leadHolderPlayerId = winningPlayerId;
             gameState.consecutiveWins = 1;
-            setStatusMessage(`${gameState.players.find(p=>p.id===winningPlayerId).name} took the lead for Team ${winningTeam}. They must win the next hand to claim the stack.`);
-            // Update UI team counters
-            if (winningTeam === 1) {
-                gameState.team1Consecutive = gameState.consecutiveWins;
-                gameState.team2Consecutive = 0;
-            } else {
-                gameState.team2Consecutive = gameState.consecutiveWins;
-                gameState.team1Consecutive = 0;
-            }
+            gameState.team1Consecutive = (winningTeam === 1) ? 1 : 0;
+            gameState.team2Consecutive = (winningTeam === 2) ? 1 : 0;
+
+            const message = `${winnerName} (Team ${displayTeam}) took over the lead as senior! Cards stay on table (Stack: ${gameState.stackedPoints}) — ${winnerName} must win the next hand to collect all ${gameState.stackedPoints + 1} pts!`;
+            setStatusMessage(message);
             updateUI();
-            return;
+            return { message, wasConsecutive: false };
         }
+
+        // Same senior player held the lead and won a consecutive hand!
+        gameState.consecutiveWins += 1;
+        gameState.leadHolderPlayerId = winningPlayerId;
 
         // Update team-specific consecutive counters for UI
         if (winningTeam === 1) {
@@ -2912,54 +3654,64 @@ function handleScoring(winningTeam, winningPlayerId) {
             gameState.team1Consecutive = 0;
         }
 
-        // Determine required wins dynamically:
+        // Round 1 (currentStake === 1):
+        //   - Requires 3 hands played on the table (stackedPoints >= 3) AND the senior player winning 2nd & 3rd consecutive hand:
+        //     * If the same senior player won Hand 1 & Hand 2 (stackedPoints === 2), requiredWins is 3 (must also win Hand 3).
+        //     * Once stackedPoints >= 3 (Hand 3+), winning 2 consecutive hands by the same senior player claims the entire stack!
+        // Round 2+ (currentStake === 2 or stake1Completed):
+        //   - Condition is changed: any senior player who wins 2 consecutive hands immediately claims all stacked points.
         let requiredWins;
-        if (gameState.currentStake === 2) {
+        if (mode === 'two_plus' || gameState.currentStake === 2 || gameState.stake1Completed) {
             requiredWins = 2;
         } else {
             requiredWins = (gameState.stackedPoints >= 3) ? 2 : 3;
         }
 
         if (gameState.consecutiveWins >= requiredWins) {
-            // Award all stacked points to the winning team
+            const claimedPoints = gameState.stackedPoints;
             if (winningTeam === 1) {
-                gameState.team1Points += gameState.stackedPoints;
+                gameState.team1Points += claimedPoints;
             } else {
-                gameState.team2Points += gameState.stackedPoints;
+                gameState.team2Points += claimedPoints;
             }
 
-            setStatusMessage(`Team ${winningTeam} wins ${gameState.stackedPoints} points for ${requiredWins} consecutive wins!`);
+            const wasRound1 = gameState.currentStake === 1 && !gameState.stake1Completed;
+            const message = wasRound1
+                ? `Team ${displayTeam} (${winnerName}) holds the lead and sweeps ${claimedPoints} stacked points! Table cleared — Round 2 starts (2 consecutive hands wins).`
+                : `Team ${displayTeam} (${winnerName}) wins 2 consecutive hands and sweeps ${claimedPoints} stacked points! Table cleared.`;
+            setStatusMessage(message);
 
-            // Reset for next stake and clear the table immediately (UI will also refresh)
+            // Clear the played cards from the table and reset stack for the next round
             resetTable();
 
-            // Move to Stake 2 if we were in Stake 1
+            // Move to Round 2 (Stake 2) if we were in Round 1
             if (gameState.currentStake === 1) {
                 gameState.currentStake = 2;
                 gameState.stake1Completed = true;
             }
 
-            // Ensure UI shows awarded points and cleared table
             updateUI();
+            return { message, wasConsecutive: true };
         } else {
-            setStatusMessage(`Team ${winningTeam} continues the challenge! Stack: ${gameState.stackedPoints} (Consecutive: ${gameState.consecutiveWins})`);
+            const message = `${winnerName} (Team ${displayTeam}) wins 2nd consecutive hand (${gameState.consecutiveWins}/${requiredWins})! Win 3rd hand to sweep ${gameState.stackedPoints + 1} pts · Stack: ${gameState.stackedPoints}`;
+            setStatusMessage(message);
             updateUI();
+            return { message, wasConsecutive: true };
         }
     } else {
-        // Different team wins - they break the streak and take over; the winning player becomes new lead holder
+        // Opponent cuts/overtakes the lead — cards and points KEEP STACKING on the table!
         gameState.currentChallengeTeam = winningTeam;
         gameState.consecutiveWins = 1;
         gameState.leadHolderPlayerId = winningPlayerId;
 
-        // Reset team-specific consecutive counters
         gameState.team1Consecutive = (winningTeam === 1) ? 1 : 0;
         gameState.team2Consecutive = (winningTeam === 2) ? 1 : 0;
-
-        // ensure any initialLeadTeam (if present) is cleared
         gameState.initialLeadTeam = null;
 
-        setStatusMessage(`Team ${winningTeam} breaks the streak! ${gameState.players.find(p=>p.id===winningPlayerId).name} leads with ${gameState.stackedPoints} points in stack.`);
+        const message = `Team ${displayTeam} (${winnerName}) cuts the lead! Cards & points keep stacking (Stack: ${gameState.stackedPoints}) — win next hand to sweep ${gameState.stackedPoints + 1} pts!`;
+        setStatusMessage(message);
         updateUI();
+        return { message, wasConsecutive: false };
     }
 }
 
@@ -2970,6 +3722,7 @@ function resetTable() {
     gameState.team1Consecutive = 0;
     gameState.team2Consecutive = 0;
     gameState.currentChallengeTeam = null;
+    gameState.leadHolderPlayerId = null;
     
     // Clear table state
     gameState.tableCards = [];
@@ -2990,18 +3743,21 @@ function resetTable() {
     updateUI();
 }
 
-function addHandWinner(playerName, team) {
-    const isConsecutive = (team === 1 && gameState.team1Consecutive > 1) || 
-                         (team === 2 && gameState.team2Consecutive > 1);
+function addHandWinner(playerName, team, wasConsecutiveOverride) {
+    const displayTeam = getDisplayTeamNumber(team);
+    const isConsecutive = typeof wasConsecutiveOverride === 'boolean'
+        ? wasConsecutiveOverride
+        : ((team === 1 && gameState.team1Consecutive > 1) ||
+           (team === 2 && gameState.team2Consecutive > 1));
     
     const winnerElement = $('<div class="hand-winner"></div>');
-    winnerElement.addClass(`team${team}`);
+    winnerElement.addClass(`team${displayTeam}`);
     if (isConsecutive) {
         winnerElement.addClass('consecutive');
     }
     
     winnerElement.html(`
-        <strong>Hand ${gameState.totalHandsPlayed}:</strong> ${playerName} (Team ${team})
+        <strong>Hand ${gameState.totalHandsPlayed}:</strong> ${playerName} (Team ${displayTeam})
         ${isConsecutive ? '<i class="fas fa-fire text-warning ms-1"></i>' : ''}
     `);
     
@@ -3029,7 +3785,7 @@ function endGame() {
         } else {
             gameState.team2Points += gameState.stackedPoints;
         }
-        setStatusMessage(`Team ${gameState.currentChallengeTeam} claims ${gameState.stackedPoints} stacked points at game end!`);
+        setStatusMessage(`Team ${getDisplayTeamNumber(gameState.currentChallengeTeam)} claims ${gameState.stackedPoints} stacked points at game end!`);
         gameState.stackedPoints = 0;
     }
     
@@ -3055,12 +3811,18 @@ function endGame() {
     let celebrationTitle = 'ROUND CLEAR!';
     let isSweep = false;
     if (gameState.team1Points > gameState.team2Points) {
-        winnerMessage = `Team 1 Wins!`;
-        steakMessage = `Final Score: ${gameState.team1Points} - ${gameState.team2Points}`;
+        const localTeamWon = gameState.players[getLocalPerspectiveSeatIndex()].team === 1;
+        winnerMessage = `Team ${localTeamWon ? 1 : 2} Wins!`;
+        steakMessage = localTeamWon
+            ? `Final Score: ${gameState.team1Points} - ${gameState.team2Points}`
+            : `Final Score: ${gameState.team2Points} - ${gameState.team1Points}`;
         gameState.lastWinningTeam = 1;
     } else if (gameState.team2Points > gameState.team1Points) {
-        winnerMessage = `Team 2 Wins!`;
-        steakMessage = `Final Score: ${gameState.team2Points} - ${gameState.team1Points}`;
+        const localTeamWon = gameState.players[getLocalPerspectiveSeatIndex()].team === 2;
+        winnerMessage = `Team ${localTeamWon ? 1 : 2} Wins!`;
+        steakMessage = localTeamWon
+            ? `Final Score: ${gameState.team2Points} - ${gameState.team1Points}`
+            : `Final Score: ${gameState.team1Points} - ${gameState.team2Points}`;
         gameState.lastWinningTeam = 2;
     } else {
         // Tie condition
@@ -3075,37 +3837,72 @@ function endGame() {
         const chooserWasSwept = trumpChooser && trumpChooser.team !== gameState.lastWinningTeam;
         celebrationTitle = chooserWasSwept ? 'GOOHN COURT!!' : 'COURT!!';
         const losingTeam = gameState.lastWinningTeam === 1 ? 2 : 1;
+        const displayedLosingTeam = getDisplayTeamNumber(losingTeam);
         steakMessage += chooserWasSwept
-            ? ` · Team ${losingTeam} was shut out — 😂 LOL`
-            : ` · Team ${losingTeam} got swept — 😂 LOL`;
+            ? ` · Team ${displayedLosingTeam} was shut out — 😂 LOL`
+            : ` · Team ${displayedLosingTeam} got swept — 😂 LOL`;
     }
 
+    const partners = { 1: 3, 2: 4, 3: 1, 4: 2 };
     if (gameState.lastWinningTeam) {
-        const partners = { 1: 3, 2: 4, 3: 1, 4: 2 };
+        const previousChooser = gameState.players.find(player => player.id === gameState.trumpChooserId);
         const finalHandWinner = gameState.lastHandWinnerId;
         const winnerOnLastHand = finalHandWinner &&
             gameState.players.find(player => player.id === finalHandWinner)?.team === gameState.lastWinningTeam;
-        if (winnerOnLastHand) {
-            gameState.nextTrumpChooserId = partners[finalHandWinner];
+        // Lead player on the winning team: if the winning team already held trump, keep that lead player;
+        // otherwise, the winning team takes over trump decision (via their final-hand winner or primary seat).
+        const winningTeamLeadId = (previousChooser && previousChooser.team === gameState.lastWinningTeam)
+            ? previousChooser.id
+            : (winnerOnLastHand ? finalHandWinner : (gameState.lastWinningTeam === 1 ? 1 : 2));
+
+        if (isSweep) {
+            // 13-point Court: trump suit selection shifts to the partner on the winning team!
+            gameState.nextTrumpChooserId = partners[winningTeamLeadId];
         } else {
-            gameState.nextTrumpChooserId = gameState.lastWinningTeam === 1 ? 3 : 2;
+            // Normal win (< 13 points): the winning team decides the trump suit next game!
+            gameState.nextTrumpChooserId = winningTeamLeadId;
         }
+    } else {
+        gameState.nextTrumpChooserId = gameState.trumpChooserId || 1;
     }
 
     recordOnlineGame(isSweep, celebrationTitle);
     onlineState.endGameResult = { isSweep, celebrationTitle };
     
+    // Build bold loser taunt message
+    let loserTauntText = '';
+    if (gameState.lastWinningTeam) {
+        const losingTeamNum = gameState.lastWinningTeam === 1 ? 2 : 1;
+        const displayedLosingTeam = getDisplayTeamNumber(losingTeamNum);
+        const losingPlayers = gameState.players
+            .filter(p => p.team === losingTeamNum)
+            .map(p => p.name)
+            .join(' & ');
+        const losingScore = Math.min(gameState.team1Points, gameState.team2Points);
+        if (isSweep) {
+            loserTauntText = celebrationTitle === 'GOOHN COURT!!'
+                ? `👑😂 SAVAGE ROAST: Team ${displayedLosingTeam} (${losingPlayers}) called Trump and still scored 0/13 — GOOHN COURT! Pack your bags! 🃏🔥`
+                : `🏆😂 COURT SWEEP TAUNT: Team ${displayedLosingTeam} (${losingPlayers}) got completely swept 13 - 0! Did you forget how to play Rung?! 💃🕺`;
+        } else {
+            loserTauntText = `😜 TAUNT: Team ${displayedLosingTeam} (${losingPlayers}) only managed ${losingScore} pts — outplayed under the VIP club lights! Better luck next deal! ✨`;
+        }
+    } else {
+        loserTauntText = `🤝 Deadlock at the VIP Table! Next hand settles who rules the club!`;
+    }
+
     // Show celebration
     rulesAreOpen = false;
-    $('#celebration').removeClass('celebration--rules');
+    $('#celebration').removeClass('celebration--rules').addClass('celebration--flashing');
     $('#celebration-title')
         .text(celebrationTitle)
+        .addClass('rainbow-glow-font')
         .toggleClass('celebration-title--court', isSweep);
-    $('#trophy').show();
-    $('#play-again-btn').text('Play Again');
-    $('#end-game-btn').prop('hidden', false).prop('disabled', false).text('End Game');
+    $('#celebration-dancer-wrap, #trophy').show();
+    $('#loser-taunt-banner').text(loserTauntText).show();
+    $('#play-again-btn').html('🃏 Play Again');
+    $('#end-game-btn').prop('hidden', false).prop('disabled', false).html('🚪 End Game');
     $('#rules-content').hide().empty();
-    $('#win-message').text(winnerMessage);
+    $('#win-message').text(winnerMessage).addClass('rainbow-glow-font');
     const nextChooser = gameState.players.find(player => player.id === gameState.nextTrumpChooserId);
     const steakText = gameState.lastWinningTeam
         ? `${steakMessage} · ${nextChooser.name} chooses trump next game`
@@ -3237,6 +4034,7 @@ function showRules() {
                 <li>Follow suit if you can.</li>
                 <li>Cards accumulate in the stack; consecutive wins claim the stack.</li>
                 <li>Trump suit beats led suit; within suit higher rank wins (A high).</li>
+                <li>Each seated player sees their own hand at the bottom and their partner across the table. The trump chooser stays the same between games until a team wins Court.</li>
             </ul>
             <h6>Goal</h6>
             <p>Collect the stacked points by achieving required consecutive wins as per the current stake.</p>
@@ -3260,9 +4058,9 @@ function showRules() {
         </div>
     `;
     rulesAreOpen = true;
-    $('#celebration').addClass('celebration--rules');
+    $('#celebration').addClass('celebration--rules').removeClass('celebration--flashing');
     $('#celebration-title').text('HOW TO PLAY').removeClass('celebration-title--court');
-    $('#trophy, #win-message, #steak-display').hide();
+    $('#celebration-dancer-wrap, #trophy, #win-message, #loser-taunt-banner, #steak-display').hide();
     $('#rules-content').html(rulesHtml).show();
     $('#play-again-btn').text('Close');
     $('#end-game-btn').prop('hidden', true);
@@ -3271,12 +4069,22 @@ function showRules() {
 
 function closeRules() {
     rulesAreOpen = false;
-    $('#celebration').removeClass('celebration--rules').hide();
-    $('#celebration-title').text('ROUND CLEAR!').removeClass('celebration-title--court');
-    $('#trophy, #win-message, #steak-display').show();
+    $('#celebration').removeClass('celebration--rules');
+    const result = onlineState.endGameResult;
+    const isGameEnd = gameState.gameState === 'GAME_END';
+    const title = isGameEnd && result?.celebrationTitle ? result.celebrationTitle : 'ROUND CLEAR!';
+    $('#celebration-title')
+        .text(title)
+        .toggleClass('celebration-title--court', Boolean(isGameEnd && result?.isSweep));
+    $('#celebration-dancer-wrap, #trophy, #win-message, #loser-taunt-banner, #steak-display').show();
     $('#rules-content').hide().empty();
-    $('#play-again-btn').text('Play Again');
-    $('#end-game-btn').prop('hidden', gameState.gameState !== 'GAME_END');
+    $('#play-again-btn').html('🃏 Play Again');
+    $('#end-game-btn').prop('hidden', !isGameEnd);
+    if (isGameEnd) {
+        $('#celebration').addClass('celebration--flashing').css('display', 'flex');
+    } else {
+        $('#celebration').hide();
+    }
 }
 
 // New: safe wrapper that invokes a real aiSelectTrump if available, otherwise uses a fallback
@@ -3331,7 +4139,7 @@ function safeAiPlayTurn() {
         }
 
         // Fallback: if current player is AI, pick a card via aiPlayCard (if available) or simple random
-        if (gameState.gameState !== "PLAYING") return;
+        if (gameState.gameState !== "PLAYING" || gameState.trickCards.length >= 4) return;
         const current = gameState.players[gameState.currentPlayer];
         if (!current || current.isHuman) return;
 
@@ -3367,22 +4175,95 @@ if (typeof window !== 'undefined') {
     if (typeof window.aiPlayTurn !== 'function') {
         window.aiPlayTurn = safeAiPlayTurn;
     }
-    // ensure aiPlayCard has a minimal fallback so other AI wrappers can call it
+    // ensure aiPlayCard has a tactical Court Piece implementation so bots play intelligently
     if (typeof window.aiPlayCard !== 'function' && typeof aiPlayCard !== 'function') {
         window.aiPlayCard = function(player) {
             if (!player || !player.cards || !player.cards.length) return null;
-            // follow suit if possible
-            if (gameState.ledSuit) {
-                const same = player.cards.filter(c => c.suit === gameState.ledSuit);
-                if (same.length) return same[Math.floor(Math.random() * same.length)];
+            const byRankAsc = (a, b) => RANK_VALUES[a.rank] - RANK_VALUES[b.rank];
+            const byRankDesc = (a, b) => RANK_VALUES[b.rank] - RANK_VALUES[a.rank];
+            const trumpSuit = gameState.trumpSuit;
+            const ledSuit = gameState.ledSuit;
+
+            // Helper to find who currently holds the winning card in trickCards
+            const getCurrentTrickWinner = () => {
+                if (!gameState.trickCards || !gameState.trickCards.length) return null;
+                let best = gameState.trickCards[0];
+                for (let i = 1; i < gameState.trickCards.length; i++) {
+                    const entry = gameState.trickCards[i];
+                    const c = entry.card;
+                    const w = best.card;
+                    if (w.suit !== trumpSuit && c.suit === trumpSuit) {
+                        best = entry;
+                    } else if (c.suit === w.suit && RANK_VALUES[c.rank] > RANK_VALUES[w.rank]) {
+                        best = entry;
+                    }
+                }
+                const winnerPlayer = gameState.players.find(p => p.id === best.player);
+                return { card: best.card, player: winnerPlayer, team: winnerPlayer?.team };
+            };
+
+            // 1. Leading the trick
+            if (!ledSuit) {
+                const nonTrumps = player.cards.filter(c => c.suit !== trumpSuit);
+                const topNonTrumps = nonTrumps.filter(c => c.rank === 'A' || c.rank === 'K').sort(byRankDesc);
+                if (topNonTrumps.length) return topNonTrumps[0];
+                const pool = nonTrumps.length ? nonTrumps : player.cards;
+                const counts = {};
+                pool.forEach(c => { counts[c.suit] = (counts[c.suit] || 0) + 1; });
+                const sorted = [...pool].sort((a, b) =>
+                    (counts[b.suit] - counts[a.suit]) || (RANK_VALUES[b.rank] - RANK_VALUES[a.rank])
+                );
+                return sorted[0];
             }
-            return player.cards[Math.floor(Math.random() * player.cards.length)];
+
+            const currentBest = getCurrentTrickWinner();
+            const partnerWinning = currentBest && currentBest.team === player.team;
+            const partnerIsLeadHolder = partnerWinning && currentBest.player && currentBest.player.id === gameState.leadHolderPlayerId;
+            const isFourthToPlay = gameState.trickCards.length === 3;
+            const partnerHasStrongWinner = partnerWinning && (
+                partnerIsLeadHolder ||
+                isFourthToPlay ||
+                currentBest.card.suit === trumpSuit ||
+                RANK_VALUES[currentBest.card.rank] >= RANK_VALUES['K']
+            );
+
+            // 2. Following suit
+            const sameSuit = player.cards.filter(c => c.suit === ledSuit).sort(byRankAsc);
+            if (sameSuit.length) {
+                if (partnerHasStrongWinner) {
+                    return sameSuit[0]; // play lowest card when partner already has the trick covered
+                }
+                // Can we beat the current winning card? (Only possible if current winner is ledSuit)
+                if (currentBest && currentBest.card.suit === ledSuit) {
+                    const winners = sameSuit.filter(c => RANK_VALUES[c.rank] > RANK_VALUES[currentBest.card.rank]);
+                    if (winners.length) {
+                        return isFourthToPlay ? winners[0] : winners[winners.length - 1];
+                    }
+                }
+                return sameSuit[0];
+            }
+
+            // 3. Void in led suit
+            const nonTrumps = player.cards.filter(c => c.suit !== trumpSuit).sort(byRankAsc);
+            const trumps = player.cards.filter(c => c.suit === trumpSuit).sort(byRankAsc);
+
+            if (!partnerHasStrongWinner && trumps.length) {
+                if (currentBest && currentBest.card.suit === trumpSuit) {
+                    const overTrumps = trumps.filter(c => RANK_VALUES[c.rank] > RANK_VALUES[currentBest.card.rank]);
+                    if (overTrumps.length) return overTrumps[0];
+                } else {
+                    return trumps[0]; // cut with lowest trump
+                }
+            }
+
+            // Slough lowest non-trump card (or lowest trump if holding only trumps)
+            return nonTrumps.length ? nonTrumps[0] : player.cards.slice().sort(byRankAsc)[0];
         };
     }
 }
 
 // New: begin the current player's turn (shows status and triggers AI if needed)
-function startTurn() {
+function startTurn(previousHandNotice = '') {
     try {
         // default to human (index 0) if currentPlayer is invalid
         if (typeof gameState.currentPlayer !== 'number' || gameState.currentPlayer < 0 || gameState.currentPlayer > 3) {
@@ -3393,19 +4274,21 @@ function startTurn() {
         const current = gameState.players[gameState.currentPlayer];
         if (!current) return;
 
+        const prefix = previousHandNotice ? `${previousHandNotice} · ` : '';
         if (current.isHuman) {
             const isLocalHostTurn = onlineState.isHost && current.uid === window.rungFirebase?.user.uid;
-            setStatusMessage(isLocalHostTurn || !onlineState.isHost
+            const turnPrompt = isLocalHostTurn || !onlineState.isHost
                 ? 'Your turn - play a card'
-                : `Waiting for ${current.name} to play…`);
+                : `Waiting for ${current.name} to play…`;
+            setStatusMessage(`${prefix}${turnPrompt}`);
             startOnlineTurnTimer();
         } else {
-            setStatusMessage(`${current.name} is playing...`);
+            setStatusMessage(`${prefix}${current.name} is playing...`);
             // Use safe exposed AI play function
             const aiFn = (typeof window !== 'undefined' && typeof window.aiPlayTurn === 'function') ? window.aiPlayTurn
                         : (typeof aiPlayTurn === 'function' ? aiPlayTurn : null);
             if (aiFn) {
-                setTimeout(aiFn, 1000);
+                setTimeout(aiFn, 550);
             } else {
                 console.warn('startTurn: no aiPlayTurn available');
             }

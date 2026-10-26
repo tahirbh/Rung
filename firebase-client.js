@@ -1,7 +1,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
 import {
-    getFirestore, collection, doc, addDoc, getDoc, getDocs, onSnapshot,
+    getFirestore, initializeFirestore, collection, doc, addDoc, getDoc, getDocs, onSnapshot,
     query, where, limit, serverTimestamp, runTransaction, updateDoc, setDoc, deleteDoc
 } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
 
@@ -17,7 +17,12 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
+let db;
+try {
+    db = initializeFirestore(app, { experimentalAutoDetectLongPolling: true });
+} catch (e) {
+    db = getFirestore(app);
+}
 
 const BOT_NAMES = [
     'Aisha', 'Amara', 'Anika', 'Arjun', 'Aya', 'Bao', 'Camila', 'Chidi', 'Dara',
@@ -59,7 +64,7 @@ function codeValue() {
     return [...bytes].map(byte => alphabet[byte % alphabet.length]).join('');
 }
 
-async function createRoom(name, visibility) {
+async function createRoom(name, visibility, scoringMode = 'classic_3_2') {
     const user = await currentUser;
     const usedBotNames = new Set([name.toLowerCase()]);
     let tableCode = codeValue();
@@ -74,6 +79,7 @@ async function createRoom(name, visibility) {
         hostUid: user.uid,
         hostName: name,
         visibility,
+        scoringMode,
         status: 'WAITING',
         tableCode,
         inviteCode: visibility === 'private' ? inviteCode : null,
@@ -113,7 +119,7 @@ async function resolveRoomCode(code) {
     }
 }
 
-async function requestSeat(roomId, name, code = null, playerId = null) {
+async function requestSeat(roomId, name, code = null, playerId = null, preferredSeatIndex = null) {
     const user = await currentUser;
     const requestRef = doc(db, 'rooms', roomId, 'memberRequests', user.uid);
     await setDoc(requestRef, {
@@ -122,6 +128,7 @@ async function requestSeat(roomId, name, code = null, playerId = null) {
         playerId,
         role: 'player',
         inviteCode: code,
+        preferredSeatIndex: Number.isInteger(preferredSeatIndex) ? preferredSeatIndex : null,
         status: 'pending',
         createdAt: serverTimestamp()
     });
@@ -152,12 +159,15 @@ async function acceptRequest(roomId, uid, seatIndex = null) {
         if (!roomSnapshot.exists() || !pendingSnapshot.exists()) return null;
         const room = roomSnapshot.data();
         const request = pendingSnapshot.data();
-        if (request.status !== 'pending') return request;
+        const explicitSeat = Number.isInteger(seatIndex) && seatIndex >= 0 && seatIndex < 4;
+        if (request.status !== 'pending' && !(explicitSeat && request.role === 'viewer')) return request;
 
-        const isViewer = request.role === 'viewer';
+        const isViewer = !explicitSeat && request.role === 'viewer';
         const chosenSeat = isViewer ? null : Number.isInteger(seatIndex)
             ? seatIndex
-            : room.seats.findIndex(seat => seat.isBot);
+            : (Number.isInteger(request.preferredSeatIndex) && room.seats[request.preferredSeatIndex]?.isBot
+                ? request.preferredSeatIndex
+                : (room.seats[2]?.isBot ? 2 : room.seats.findIndex(seat => seat.isBot)));
         if (!isViewer && (chosenSeat < 0 || !room.seats[chosenSeat]?.isBot)) {
             const rejected = { ...request, status: 'full' };
             transaction.update(requestRef, { status: 'full' });
@@ -174,7 +184,7 @@ async function acceptRequest(roomId, uid, seatIndex = null) {
         const memberUids = [...new Set([...room.memberUids, request.uid])];
         const viewerUids = isViewer
             ? [...new Set([...(room.viewerUids || []), request.uid])]
-            : room.viewerUids || [];
+            : (room.viewerUids || []).filter(id => id !== request.uid);
         transaction.update(roomRef(roomId), {
             seats,
             memberUids,
@@ -188,7 +198,7 @@ async function acceptRequest(roomId, uid, seatIndex = null) {
             roomStatus: room.status,
             acceptedAt: serverTimestamp()
         });
-        return { ...request, status: 'accepted', seatIndex: chosenSeat, roomStatus: room.status };
+        return { ...request, role: isViewer ? 'viewer' : 'player', status: 'accepted', seatIndex: chosenSeat, roomStatus: room.status };
     });
 }
 
@@ -199,13 +209,15 @@ async function rejectRequest(roomId, uid) {
     });
 }
 
-async function submitAction(roomId, seatIndex, card, kind = 'card') {
+async function submitAction(roomId, seatIndex, card, kind = 'card', senderName = null) {
     const user = await currentUser;
     return addDoc(collection(db, 'rooms', roomId, 'actions'), {
         uid: user.uid,
         seatIndex,
         kind,
-        card: card ? { suit: card.suit, rank: card.rank } : null,
+        card: kind === 'card' && card ? { suit: card.suit, rank: card.rank } : null,
+        reaction: kind === 'reaction' ? String(card || '').slice(0, 80) : null,
+        senderName: senderName ? String(senderName).slice(0, 24) : null,
         trumpSuit: kind === 'trump' ? card : null,
         createdAt: serverTimestamp(),
         processed: false
@@ -230,8 +242,8 @@ async function publishRoom(roomId, roomPatch, players, publicState) {
         publicState,
         updatedAt: serverTimestamp()
     };
-    await updateDoc(roomRef(roomId), updates);
-    await publishPrivateHands(roomId, players);
+    const roomPromise = updateDoc(roomRef(roomId), updates);
+    await Promise.all([roomPromise, publishPrivateHands(roomId, players)]);
 }
 
 async function saveHostState(roomId, state) {
@@ -246,6 +258,11 @@ async function getHostState(roomId) {
     const user = await currentUser;
     const snapshot = await getDoc(doc(db, 'rooms', roomId, 'hostState', user.uid));
     return snapshot.exists() ? snapshot.data().state : null;
+}
+
+async function getRoom(roomId) {
+    const snapshot = await getDoc(roomRef(roomId));
+    return snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null;
 }
 
 async function markActionProcessed(actionRef) {
@@ -317,6 +334,11 @@ function listenActions(roomId, callback, onError) {
             if (change.type === 'added') callback(change.doc);
         });
     }, onError);
+}
+
+async function getPrivateHand(roomId, uid) {
+    const snapshot = await getDoc(doc(db, 'rooms', roomId, 'privateHands', uid));
+    return snapshot.exists() ? snapshot.data() : null;
 }
 
 function listenPrivateHand(roomId, uid, callback, onError) {
@@ -405,6 +427,7 @@ window.rungFirebaseReady = currentUser.then(user => {
         publishRoom,
         saveHostState,
         getHostState,
+        getRoom,
         markActionProcessed,
         updateLeaderboard,
         getMyLeaderboardEntry,
@@ -412,6 +435,7 @@ window.rungFirebaseReady = currentUser.then(user => {
         listenRoom,
         listenRequests,
         listenActions,
+        getPrivateHand,
         listenPrivateHand,
         listenMemberRequest,
         deleteMemberRequest,
